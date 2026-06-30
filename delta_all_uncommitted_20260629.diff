@@ -1,0 +1,1766 @@
+diff --git a/api_export_inspections.php b/api_export_inspections.php
+index 99d159a..3632d7a 100644
+--- a/api_export_inspections.php
++++ b/api_export_inspections.php
+@@ -109,6 +109,18 @@ if ($action === 'inspection_count') {
+ // ── inspections_json — paginated rows, grouped-friendly order ────────────────────
+ if ($action === 'inspections_json') {
+     try {
++        // Optional single-product filter. The "Restore one template's bubbles"
++        // button in MagDyn passes ?pid=<n> so it can rebuild just that template
++        // without walking the whole table. Absent/blank = full export (old
++        // behaviour). Parameterised to stay injection-safe.
++        $pidFilter = isset($_GET['pid']) ? trim((string)$_GET['pid']) : '';
++        $where  = '';
++        $params = array();
++        if ($pidFilter !== '') {
++            $where = ' WHERE i.pid = ? ';
++            $params[] = $pidFilter;
++        }
++
+         // Order by pid so a single product's rows stay together, then by the
+         // row id (initialdata_id) so bubble order is preserved. The importer
+         // re-groups by pid anyway, but a stable order keeps templates tidy.
+@@ -122,10 +134,13 @@ if ($action === 'inspections_json') {
+                    im.inventory_model_code AS model_code
+               FROM inspection i
+          LEFT JOIN inventory_model im ON im.inventory_model_id = i.pid
++              " . $where . "
+           ORDER BY CAST(i.pid AS UNSIGNED) ASC, i.pid ASC, i.initialdata_id ASC
+              LIMIT " . $limit . " OFFSET " . $offset . "
+         ";
+-        $rows = $pdo->query($sql)->fetchAll();
++        $st = $pdo->prepare($sql);
++        $st->execute($params);
++        $rows = $st->fetchAll();
+         echo json_encode(array('rows' => $rows, 'count' => count($rows)));
+     } catch (Exception $e) {
+         echo json_encode(array('error' => 'Query failed: ' . $e->getMessage()));
+diff --git a/bom_old_import.php b/bom_old_import.php
+index 6de8e68..0fae02e 100644
+--- a/bom_old_import.php
++++ b/bom_old_import.php
+@@ -77,6 +77,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'delete
+     redirect(url('/bom_old_import.php'));
+ }
+ 
++// ── POST: fix shipments wrongly marked 'received' while qty is still open ─────
++// The old-inventory import sets a combined Ship #'s header status from whichever
++// receipt was imported last (see the receipts case below, "status = IF(status =
++// 'closed', status, ?)"). When one Ship # carries several receive lines and at
++// least one still has open qty (qty_planned > qty_received) but the header
++// happened to land on status='received', the page hides the "Record a receipt"
++// form (it only shows for 'approved'/'shipped'), so the operator can't book the
++// outstanding qty. Business rule: a shipment with ANY open receive line must be
++// 'approved' (shows as Planned, stays receivable) — never 'received'. This flips
++// those discrepant headers back to 'approved'. Fully-received ('received') and
++// deliberately short-closed ('closed') shipments are left untouched.
++if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'fix_open_received') {
++    csrf_check();
++    require_permission('inventory_shiprcpt', 'manage');
++
++    try {
++        $affected = db_exec(
++            "UPDATE inv_shipments sh
++                SET sh.status     = 'approved',
++                    sh.updated_at = sh.updated_at   -- keep the imported timestamp
++              WHERE sh.status = 'received'
++                AND EXISTS (
++                        SELECT 1
++                          FROM inv_shipment_lines sl
++                         WHERE sl.shipment_id = sh.id
++                           AND sl.line_kind   = 'receive'
++                           AND sl.qty_planned > sl.qty_received + 0.0001
++                    )"
++        );
++        if ($affected > 0) {
++            flash_set('success', $affected . ' shipment' . ($affected === 1 ? '' : 's')
++                . " with open quantity reset from “received” to “approved” — receipts can now be recorded.");
++        } else {
++            flash_set('info', 'No discrepancies found — every shipment marked received is fully received.');
++        }
++    } catch (Throwable $e) {
++        flash_set('error', 'Fix failed: ' . $e->getMessage());
++    }
++
++    redirect(url('/bom_old_import.php'));
++}
++
+ // ── helpers: resolve or auto-create vendors / couriers / items ───────────────
+ 
+ /**
+@@ -1727,6 +1769,49 @@ require __DIR__ . '/includes/header.php';
+             <?php endforeach; ?>
+         </div>
+ 
++        <?php
++        // Discrepant shipments: header says 'received' but at least one receive
++        // line still has open qty (qty_planned > qty_received). These show as
++        // Planned/RECEIVED on the Ship & Receipts list and block recording the
++        // outstanding receipt. Count them so the operator knows if a fix is due.
++        $openReceivedCount = (int)db_val(
++            "SELECT COUNT(*)
++               FROM inv_shipments sh
++              WHERE sh.status = 'received'
++                AND EXISTS (
++                        SELECT 1 FROM inv_shipment_lines sl
++                         WHERE sl.shipment_id = sh.id
++                           AND sl.line_kind   = 'receive'
++                           AND sl.qty_planned > sl.qty_received + 0.0001
++                    )",
++            [], 0
++        );
++        ?>
++        <h3 style="margin:0 0 10px;">Data fixes</h3>
++        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:16px 20px;margin-bottom:24px;">
++            <p style="margin:0 0 12px;font-size:14px;color:#92400e;">
++                <strong>Fix “received” shipments with open quantity.</strong>
++                Some imported shipments were marked <code>received</code> even though a
++                receive line still has quantity left to receive — these appear as
++                <em>Planned / RECEIVED</em> on the Ship &amp; Receipts list and won't let
++                you record the outstanding receipt. This resets their status to
++                <code>approved</code> so they show as Planned and become receivable again.
++                Fully-received and closed shipments are left untouched.
++            </p>
++            <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
++                <div style="text-align:center;min-width:90px;">
++                    <div style="font-size:26px;font-weight:700;color:<?= $openReceivedCount > 0 ? '#b45309' : '#374151' ?>;"><?= number_format($openReceivedCount) ?></div>
++                    <div style="font-size:11px;color:#92400e;">to fix</div>
++                </div>
++                <form method="post" action="<?= h(url('/bom_old_import.php')) ?>"
++                      onsubmit="return confirm('Reset <?= (int)$openReceivedCount ?> shipment(s) from “received” to “approved” so their open quantity can be received?');">
++                    <?= csrf_field() ?>
++                    <input type="hidden" name="action" value="fix_open_received">
++                    <button type="submit" class="btn btn-primary"<?= $openReceivedCount > 0 ? '' : ' disabled' ?>>🛠 Fix received-with-open-qty</button>
++                </form>
++            </div>
++        </div>
++
+         <h3 style="margin:0 0 10px;">Reset</h3>
+         <div style="background:#fff5f5;border:1px solid #fecaca;border-radius:8px;padding:16px 20px;margin-bottom:24px;">
+             <p style="margin:0 0 12px;font-size:14px;color:#7f1d1d;">
+diff --git a/config/app.config.php b/config/app.config.php
+index 74bf54f..ea68a3d 100644
+--- a/config/app.config.php
++++ b/config/app.config.php
+@@ -70,10 +70,23 @@ return [
+ 
+     // ---- SSO ----
+     'sso' => [
+-        'enabled'        => true,           // flip to true once a mode is configured
+-        'mode'           => 'oidc',          // 'oidc' | 'saml' | 'header'
++        'enabled'        => true,            // shows the "Sign in with SSO" button on the login page
++        'mode'           => 'magdyn',        // 'magdyn' | 'oidc' | 'saml' | 'header'
+         'auto_provision' => true,            // create local row on first SSO login
+ 
++        // MagDyn central SSO server (see ONBOARDING). Authenticates the user
++        // centrally; MagDyn's own roles/permissions still govern authorisation.
++        // Get client_id / client_secret by registering this app in the SSO
++        // admin panel (Admin -> Apps). The redirect_uri MUST match the URL you
++        // register, character-for-character. Leave redirect_uri blank to have
++        // it auto-derived from the current host + base_url + /sso_callback.php.
++        'magdyn' => [
++            'sso_base_url'  => 'https://magdyn.com/SSO/sso-server',
++            'client_id'     => '',           // PASTE from Admin -> Apps
++            'client_secret' => '',           // PASTE from Admin -> Apps (yellow banner, shown once)
++            'redirect_uri'  => '',           // e.g. https://magdyn.com/magdyn-Final/magdyn/sso_callback.php
++        ],
++
+         'oidc' => [
+             'issuer'        => '',           // e.g. https://accounts.google.com
+             'client_id'     => '',
+diff --git a/includes/_inspection_ir.php b/includes/_inspection_ir.php
+index fa3a2a7..2c231da 100644
+--- a/includes/_inspection_ir.php
++++ b/includes/_inspection_ir.php
+@@ -237,14 +237,38 @@ function ir_results_grid($inspectionId)
+            FROM inspection_results ir
+            LEFT JOIN inspection_template_items iti ON iti.id = ir.template_item_id
+           WHERE ir.inspection_id = ?
+-          ORDER BY ir.sort_order, ir.template_item_id, ir.sample_no',
++          ORDER BY ir.sort_order, ir.bubble_no, ir.template_item_id, ir.sample_no',
+         [(int)$inspectionId]
+     );
+     $grid = [];
+-    $params = []; // parameter rows in order, dedup by template_item_id
++    $params = []; // parameter rows in order, dedup by group key
+     $seen = [];
++    // Synthetic group ids for rows whose template_item_id is NULL. This
++    // happens two ways: (1) historical records imported without a template
++    // item, and (2) the FK on inspection_results.template_item_id is
++    // ON DELETE SET NULL, so editing a template (which DELETEs + reinserts
++    // its items) nulls template_item_id on every existing result row that
++    // referenced it. Both cast to 0 below, which would collapse the WHOLE
++    // checklist into a single displayed row. We instead group such rows by
++    // their stored snapshot identity (sort_order + bubble_no + label +
++    // check_type) so each parameter stays a distinct row and its samples
++    // still bucket together. Synthetic ids are negative so they can never
++    // collide with a real template_item_id.
++    $synthSig  = [];
++    $synthNext = -1;
+     foreach ($rows as $r) {
+         $tid = (int)$r['template_item_id'];
++        if ($tid <= 0) {
++            $sig = ($r['sort_order'] ?? '') . "\0" . ($r['bubble_no'] ?? '')
++                 . "\0" . ($r['label'] ?? '') . "\0" . ($r['check_type'] ?? '');
++            if (!isset($synthSig[$sig])) {
++                $synthSig[$sig] = $synthNext--;
++            }
++            $tid = $synthSig[$sig];
++            // Write the synthetic id back so consumers that re-derive the
++            // group via (int)$param['template_item_id'] agree with $grid.
++            $r['template_item_id'] = $tid;
++        }
+         $sno = (int)($r['sample_no'] ?? 1) ?: 1;
+         $grid[$tid][$sno] = $r;
+         if (!isset($seen[$tid])) {
+@@ -401,6 +425,39 @@ function ir_resolve_inspected_item($row)
+ }
+ 
+ 
++/**
++ * Resolve the entity that template links (inspection_template_targets)
++ * are keyed on for a given inspection row: an inv_item or an asset.
++ *
++ * inv_txn-targeted inspections resolve through the txn's item_id, so a
++ * receipt/process inspection still finds the item's templates. Returns
++ * ['type' => 'inv_item'|'asset'|null, 'id' => int]. type is null (id 0)
++ * when no template-target entity can be resolved (e.g. standalone IRs).
++ *
++ * Shared by the Execute Start-Inspection template picker (to list the
++ * item's templates) and the execute_start handler (to validate the
++ * chosen template actually belongs to this item).
++ */
++function ir_template_target_entity($row)
++{
++    $entityType = (string)($row['entity_type'] ?? '');
++    $entityId   = (int)($row['entity_id'] ?? 0);
++    if ($entityType === 'inv_item' && $entityId) {
++        return ['type' => 'inv_item', 'id' => $entityId];
++    }
++    if ($entityType === 'asset' && $entityId) {
++        return ['type' => 'asset', 'id' => $entityId];
++    }
++    if ($entityType === 'inv_txn' && $entityId) {
++        $txn = db_one('SELECT item_id FROM inv_txns WHERE id = ?', [$entityId]);
++        if ($txn && (int)$txn['item_id']) {
++            return ['type' => 'inv_item', 'id' => (int)$txn['item_id']];
++        }
++    }
++    return ['type' => null, 'id' => 0];
++}
++
++
+ /**
+  * Per-sample acceptance map for an IR results grid.
+  *
+diff --git a/includes/_po_pdf.php b/includes/_po_pdf.php
+index 92e65e3..9b15b9b 100644
+--- a/includes/_po_pdf.php
++++ b/includes/_po_pdf.php
+@@ -48,7 +48,10 @@ function po_render_pdf($poId, $tempDir = null)
+     $dompdf = new \Dompdf\Dompdf([
+         'isRemoteEnabled'    => false,
+         'isHtml5ParserEnabled' => true,
+-        'defaultFont'        => 'DejaVu Sans',
++        // Helvetica is one of dompdf's built-in core fonts and matches the
++        // legacy PO template's typeface. The print HTML drives families
++        // explicitly (Helvetica body, Courier for Terms & Conditions).
++        'defaultFont'        => 'Helvetica',
+         // Use a per-render font cache subdir inside our temp dir so we
+         // never pollute the global font cache and never need write
+         // access outside /tmp.
+@@ -56,7 +59,8 @@ function po_render_pdf($poId, $tempDir = null)
+         'tempDir'            => $tempDir,
+     ]);
+     $dompdf->loadHtml($html, 'UTF-8');
+-    $dompdf->setPaper('A4', 'portrait');
++    // Landscape A4 to match the company PO template orientation exactly.
++    $dompdf->setPaper('A4', 'landscape');
+     $dompdf->render();
+ 
+     $path = $tempDir . '/' . preg_replace('/[^A-Za-z0-9._-]/', '_', $filename);
+diff --git a/includes/_po_print.php b/includes/_po_print.php
+index 3934f5e..8ec9cf1 100644
+--- a/includes/_po_print.php
++++ b/includes/_po_print.php
+@@ -6,7 +6,10 @@
+  *   - Browser print at purchase_orders.php?action=print
+  *   - PDF generation via includes/_po_pdf.php (dompdf)
+  *
+- * Layout matches company PO format (MD-DOC-0026-DF VER-1 REV-0):
++ * Layout reproduces the company PO template (MD-DOC-0026-DF VER-1 REV-0)
++ * exactly — A4 **landscape**, Helvetica body / Courier T&C, lavender
++ * (#E7E6FA) label cells, black hairline borders, and the authorised
++ * signatory's signature + company seal above "Authorised Signatory":
+  *   Page 1 — Main PO (header, vendor block, lines table, footer)
+  *   Page 2 — Input Material Issued
+  *   Page 3 — Terms & Conditions
+@@ -15,7 +18,7 @@
+  *   - No flexbox/grid, no border-radius, no box-shadow, no CSS variables
+  *   - No `* { box-sizing }` (universal selector ignored by dompdf)
+  *   - No `padding` on <table> elements (dompdf ignores it; padding goes on <td>)
+- *   - Lines table uses table-layout:fixed + <colgroup> so rowspan+colspan
++ *   - Every grid uses table-layout:fixed + <colgroup> so rowspan/colspan
+  *     column widths are computed from the colgroup, not the th attributes
+  *   - All styles inline or in <style>/<head>; no external CSS files
+  */
+@@ -84,19 +87,60 @@ function po_render_print_html($poId, array $opts = [])
+         $logoHtml    = '<img src="' . $logoDataUri . '" style="height:44px; width:auto; display:block;">';
+     }
+ 
+-    // ── Terms text (shipment override → system setting → default) ──────
+-    $terms = (string)($shipment['terms_conditions'] ?? '') !== ''
+-           ? $shipment['terms_conditions']
+-           : magdyn_setting('shiprcpt.terms_conditions', '');
++    // ── Authorised-signatory sign + company seal (extracted from the
++    //    legacy PO template; placed above "Authorised Signatory"). ───────
++    $signPath = __DIR__ . '/../assets/img/po_sign_stamp.png';
++    $signHtml = '';
++    if (file_exists($signPath)) {
++        $signDataUri = 'data:image/png;base64,' . base64_encode(file_get_contents($signPath));
++        $signHtml    = '<img src="' . $signDataUri . '" style="height:52px; width:auto;">';
++    }
+ 
+     // ── Miscellaneous shipment fields ───────────────────────────────────
+     $paymentTerms   = (string)($shipment['payment_terms']        ?? '');
+     $packFwd        = (string)($shipment['packing_forwarding']   ?? '');
+     $freightIns     = (string)($shipment['freight_insurance']    ?? '');
+     $specialInst    = (string)($shipment['special_instructions'] ?? '');
+-    $internalNotes  = (string)($shipment['notes']                ?? '');
+     $poRef          = (string)($shipment['reference']            ?? '');
+ 
++    // Packing & Forwarding / Freight & Insurance may hold either a numeric
++    // charge or free text ("Inclusive", "To pay", …). When numeric, the
++    // amount is folded into the PO total; otherwise it's shown as-is and
++    // contributes nothing. Tolerates ₹ / Rs / INR prefixes and thousands
++    // separators, e.g. "₹1,250.00" → 1250.0.
++    $po_charge = function ($v) {
++        $s = trim((string)$v);
++        if ($s === '') return null;
++        $s = preg_replace('/(?i)\b(?:rs|inr)\b\.?/', '', $s);
++        $s = str_replace([',', '₹', ' '], '', $s);
++        return is_numeric($s) ? (float)$s : null;
++    };
++    $packFwdAmt     = $po_charge($packFwd);
++    $freightInsAmt  = $po_charge($freightIns);
++
++    // ── Terms & Conditions text vs footer "Notes for Internal Use" ──────
++    // Page 3 (Terms & Conditions) prefers the per-shipment snapshot, falling
++    // back to the system default. A batch of legacy/imported shipments,
++    // however, stored the full standard T&C inside the `notes` field (with
++    // terms_conditions left blank). We detect that case by its signature
++    // wording and render it on the T&C page instead — and crucially we then
++    // DON'T echo it in the footer's "Notes for Internal Use" cell, which is
++    // what made that cell balloon. Genuine notes (material lists, vendor
++    // names, etc.) are left untouched in the footer.
++    $shipNotes    = (string)($shipment['notes']            ?? '');
++    $tcConfigured = (string)($shipment['terms_conditions'] ?? '');
++    $notesAreTerms = $tcConfigured === ''
++        && (stripos($shipNotes, 'despatched should be accompanied') !== false
++            || stripos($shipNotes, 'Delivery Challan') !== false);
++    if ($notesAreTerms) {
++        $tcText        = $shipNotes;   // legacy T&C stored in notes → page 3
++        $internalNotes = '';           // …and kept out of the footer
++    } else {
++        $tcText        = $tcConfigured !== '' ? $tcConfigured
++                       : magdyn_setting('shiprcpt.terms_conditions', '');
++        $internalNotes = $shipNotes;   // genuine note → footer
++    }
++
+     ob_start();
+     ?>
+ <!DOCTYPE html>
+@@ -105,54 +149,61 @@ function po_render_print_html($poId, array $opts = [])
+ <meta charset="UTF-8">
+ <title>PO <?= h($po['po_no']) ?></title>
+ <style>
+-    /* No universal box-sizing — dompdf ignores the * selector and it can
+-       cause width miscalculations on table cells. */
+-    body  { font-family: 'DejaVu Sans', Arial, sans-serif; font-size: 9.5px; color: #111; margin: 0; padding: 0; }
+-    .po-wrap { padding: 6mm 8mm; }
++    /* Landscape A4 to match the company PO template exactly.
++       NOTE: this dompdf build ignores the @page `margin` property, so the
++       page margin is driven by the <body> margin instead — dompdf repeats
++       it on every page, giving a consistent border on all 3 pages. */
++    @page { size: A4 landscape; }
++    html { margin: 0; padding: 0; }
++    body { margin: 10mm; padding: 0; }
++    body  { font-family: Helvetica, Arial, sans-serif; font-size: 8.5px; color: #000; }
++    .po-wrap { width: 100%; }
++
+     table { border-collapse: collapse; }
+     .w100 { width: 100%; }
+-    .b { font-weight: bold; }
+-    .c { text-align: center; }
+-    .r { text-align: right; }
+-    .small { font-size: 8.5px; }
+-    .muted { color: #555; }
+-    .lbl  { font-size: 8px; text-transform: uppercase; letter-spacing: 0.05em; color: #555; display: block; margin-bottom: 2px; }
++    .b   { font-weight: bold; }
++    .c   { text-align: center; }
++    .r   { text-align: right; }
++    .lav { background: #E7E6FA; }              /* template label/header shade */
++    .small { font-size: 8px; }
++
++    /* Full hairline-bordered grids (the template is an all-black grid). */
++    .grid { width: 100%; table-layout: fixed; border-collapse: collapse; }
++    .grid td, .grid th { border: 0.75px solid #000; padding: 3px 5px; vertical-align: top; }
++    .noborder td { border: none; padding: 0; }
++
++    .po-title { font-size: 18px; font-weight: bold; letter-spacing: 0.02em; }
++    .docref   { text-align: right; font-size: 8px; color: #000; padding: 0 1px 2px 0; }
++    .lblcell  { font-size: 8px; }
++    .pageno   { text-align: right; font-size: 8.5px; font-weight: bold; font-style: italic; margin-top: 4px; }
+     .page-break { page-break-after: always; }
+ 
+-    /* ── Header ── */
+-    .hdr-table td { vertical-align: top; padding: 0; }
+-
+-    /* ── PO title block ── */
+-    .po-title { font-size: 17px; font-weight: bold; letter-spacing: 0.04em; }
+-
+-    /* ── Lines table — table-layout:fixed + colgroup drive column widths;
+-          rowspan+colspan in the header are only structural. ── */
+-    .lines-tbl { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 8.5px; table-layout: fixed; }
+-    .lines-tbl th { background: #f0f0f0; border: 1px solid #999; padding: 3px 4px; text-align: center; vertical-align: middle; font-size: 8px; font-weight: bold; }
+-    .lines-tbl td { border: 1px solid #999; padding: 3px 4px; vertical-align: top; }
++    /* ── Lines table ── */
++    .lines-tbl { width: 100%; border-collapse: collapse; table-layout: fixed; }
++    .lines-tbl th { background: #E7E6FA; border: 0.75px solid #000; padding: 3px 3px;
++        text-align: center; vertical-align: middle; font-size: 7.6px; font-weight: bold; }
++    .lines-tbl td { border: 0.75px solid #000; padding: 3px 4px; vertical-align: top; font-size: 8px; }
+     .lines-tbl .num { text-align: right; }
+     .lines-tbl .ctr { text-align: center; }
+-    .lines-tbl tfoot td { border: 1px solid #999; padding: 3px 6px; font-weight: bold; }
+-
+-    /* ── Footer blocks ── */
+-    .foot-table td { border: 1px solid #bbb; padding: 4px 6px; vertical-align: top; font-size: 9px; }
+-    .foot-table .lbl { font-size: 8px; font-weight: bold; }
++    .lines-tbl tfoot td { border: 0.75px solid #000; padding: 3px 6px; font-weight: bold; }
+ 
+     /* ── Actions bar (browser only) ── */
+-    .actions { margin-bottom: 16px; }
++    .actions { margin-bottom: 14px; }
+     .actions a, .actions button { display: inline-block; padding: 5px 14px; border: 1px solid #999; background: #fff;
+         font-size: 12px; text-decoration: none; color: inherit; margin-right: 6px; cursor: pointer; }
+     .actions .primary { background: #2d3a8c; color: #fff; border-color: #2d3a8c; }
+-    @media print { .actions { display: none; } .po-wrap { padding: 0 8mm; } }
++    @media print { .actions { display: none; } }
+ 
+-    /* ── T&C ── */
+-    .tc-list { padding-left: 14px; margin: 0; }
+-    .tc-list li { margin-bottom: 6px; line-height: 1.5; font-size: 9px; }
++    /* ── T&C (monospace, like the template's Courier) ── */
++    .tc-title { text-align: center; font-size: 12px; font-weight: bold; text-decoration: underline; margin: 4px 0 14px; }
++    .tc-tbl { width: 100%; border-collapse: collapse; font-family: 'Courier New', Courier, monospace; font-size: 9px; }
++    .tc-tbl td { vertical-align: top; padding: 0 0 8px 0; line-height: 1.45; }
++    .tc-tbl td.n { width: 22px; padding-right: 2px; }
+ 
+     /* ── Input Material table ── */
+-    .imt-tbl { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 9px; }
+-    .imt-tbl th { background: #f0f0f0; border: 1px solid #999; padding: 4px 6px; text-align: center; font-weight: bold; }
+-    .imt-tbl td { border: 1px solid #999; padding: 4px 6px; }
++    .imt-tbl { width: 100%; border-collapse: collapse; margin-top: 6px; table-layout: fixed; font-size: 8.5px; }
++    .imt-tbl th { background: #E7E6FA; border: 0.75px solid #000; padding: 4px 6px; text-align: center; font-weight: bold; }
++    .imt-tbl td { border: 0.75px solid #000; padding: 4px 6px; }
+ </style>
+ </head>
+ <body>
+@@ -171,155 +222,156 @@ function po_render_print_html($poId, array $opts = [])
+      ═══════════════════════════════════════════════════════════ -->
+ 
+ <!-- Doc ref top-right -->
+-<table class="w100" style="margin-bottom:2px;"><tr>
+-    <td></td>
+-    <td style="text-align:right; font-size:8px; color:#555;">MD-DOC-0026-DF VER-1 REV-0</td>
+-</tr></table>
+-
+-<!-- Company header: logo+address LEFT | phone/email CENTRE | tax IDs RIGHT
+-     NOTE: padding on <table> is ignored by dompdf — padding lives on <td>. -->
+-<table class="w100 hdr-table" style="border:1px solid #bbb; margin-bottom:4px;">
++<div class="docref">MD-DOC-0026-DF VER-1 REV-0</div>
++
++<!-- Company header: logo | name+address | phone/email | tax IDs -->
++<table class="grid">
++    <colgroup>
++        <col style="width:9%;"><col style="width:39%;"><col style="width:21%;"><col style="width:31%;">
++    </colgroup>
+     <tr>
+-        <td style="width:8%; padding:4px 0 4px 6px; vertical-align:middle;"><?= $logoHtml ?></td>
+-        <td style="width:45%; padding:4px 8px 4px 8px; vertical-align:top; line-height:1.5;">
+-            <strong style="font-size:11px;"><?= h($co['name']) ?></strong><br>
+-            <span class="muted small"><?= h($co['address_line1']) ?></span><br>
+-            <span class="muted small"><?= h($co['address_line2']) ?></span>
++        <td class="c" style="vertical-align:middle;"><?= $logoHtml ?></td>
++        <td style="line-height:1.5;">
++            <span class="b" style="font-size:11px;"><?= h($co['name']) ?></span><br>
++            <?= h($co['address_line1']) ?><br>
++            <?= h($co['address_line2']) ?>
+         </td>
+-        <td style="width:20%; padding:4px 4px; vertical-align:top; font-size:8.5px; line-height:1.6;">
+-            <span class="muted">Phone :</span> <?= h($co['phone']) ?><br>
+-            <span class="muted">Email:</span> <?= h($co['email']) ?>
++        <td style="line-height:1.7;">
++            Phone : <?= h($co['phone']) ?><br>
++            Email: <?= h($co['email']) ?>
+         </td>
+-        <td style="width:27%; padding:4px 6px 4px 4px; vertical-align:top; font-size:8.5px; line-height:1.6; text-align:right;">
+-            <strong>GST NO:</strong> <?= h($co['gst_no']) ?> &nbsp;<strong>PAN NO:</strong> <?= h($co['pan_no']) ?><br>
+-            <strong>IEC NO:</strong> <?= h($co['iec_no']) ?> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<strong>TAN NO:</strong> <?= h($co['tan_no']) ?><br>
+-            <strong>MSME NO:</strong> <?= h($co['msme_no']) ?>
++        <td style="padding:3px 5px;">
++            <table class="w100" style="border-collapse:collapse; line-height:1.55;">
++                <tr><td style="border:none; padding:0;"><span class="b">GST NO:</span> <?= h($co['gst_no']) ?></td>
++                    <td style="border:none; padding:0;"><span class="b">PAN NO:</span> <?= h($co['pan_no']) ?></td></tr>
++                <tr><td style="border:none; padding:0;"><span class="b">IEC NO:</span> <?= h($co['iec_no']) ?></td>
++                    <td style="border:none; padding:0;"><span class="b">TAN NO:</span> <?= h($co['tan_no']) ?></td></tr>
++                <tr><td style="border:none; padding:0;"><span class="b">MSME NO:</span> <?= h($co['msme_no']) ?></td>
++                    <td style="border:none; padding:0;"></td></tr>
++            </table>
+         </td>
+     </tr>
+ </table>
+ 
+-<!-- PURCHASE ORDER title + PO No + Date
+-     Using cell borders (not table border-bottom:0) for dompdf reliability. -->
+-<table class="w100" style="border-left:1px solid #bbb; border-right:1px solid #bbb; border-top:1px solid #bbb; margin-bottom:0;">
++<!-- PURCHASE ORDER title + PO No + Date -->
++<table class="grid" style="border-top:none;">
++    <colgroup>
++        <col style="width:38%;"><col style="width:13%;"><col style="width:16%;"><col style="width:9%;"><col style="width:24%;">
++    </colgroup>
+     <tr>
+-        <td style="width:40%; padding:4px 8px;">
+-            <span class="po-title">PURCHASE ORDER</span>
+-        </td>
+-        <td style="width:20%; padding:4px 6px; text-align:center; border-left:1px solid #bbb; border-bottom:1px solid #bbb;">
+-            <span class="lbl">P.O Number</span>
+-            <strong><?= h($po['po_no']) ?></strong>
+-        </td>
+-        <td style="width:20%; padding:4px 6px; text-align:center; border-left:1px solid #bbb; border-bottom:1px solid #bbb;">
+-            <span class="lbl">Date</span>
+-            <strong><?= h($poDateFmt) ?></strong>
+-        </td>
+-        <td style="width:20%; padding:4px 6px; border-left:1px solid #bbb; border-bottom:1px solid #bbb;"></td>
++        <td style="border-top:none; vertical-align:middle;"><span class="po-title">PURCHASE ORDER</span></td>
++        <td class="lav lblcell" style="border-top:none; vertical-align:middle;">P.O Number</td>
++        <td class="b" style="border-top:none; vertical-align:middle;"><?= h($po['po_no']) ?></td>
++        <td class="lav lblcell" style="border-top:none; vertical-align:middle;">Date</td>
++        <td class="b" style="border-top:none; vertical-align:middle;"><?= h($poDateFmt) ?></td>
+     </tr>
+ </table>
+ 
+-<!-- Three-column: To Vendor | Delivery Address | Billing Address
+-     Cell borders handle internal separation; outer border from the table. -->
+-<table class="w100" style="border:1px solid #bbb; border-top:1px solid #999; margin-bottom:0;">
++<!-- To Vendor | Delivery Address | Billing Address : lavender header row, white values -->
++<table class="grid" style="border-top:none;">
++    <colgroup><col style="width:34%;"><col style="width:33%;"><col style="width:33%;"></colgroup>
+     <tr>
+-        <td style="width:34%; padding:5px 7px; vertical-align:top; border-right:1px solid #bbb;">
+-            <span class="lbl">To Vendor</span>
+-            <strong><?= h($vendor['name'] ?? '—') ?></strong>
+-            <?php if (!empty($vendor['code'])): ?>
+-                &nbsp;&nbsp;<span class="small muted">Vendor Code : <?= h($vendor['code']) ?></span>
+-            <?php endif; ?>
+-            <br>
++        <td class="lav b" style="border-top:none;">To Vendor</td>
++        <td class="lav b" style="border-top:none;">Delivery Address</td>
++        <td class="lav b" style="border-top:none;">Billing Address</td>
++    </tr>
++    <tr>
++        <td style="line-height:1.5;">
++            <table class="w100" style="border-collapse:collapse;"><tr>
++                <td style="border:none; padding:0;"><span class="b"><?= h($vendor['name'] ?? '—') ?></span></td>
++                <td style="border:none; padding:0; text-align:right;"><?php if (!empty($vendor['code'])): ?><span class="b">Vendor Code :</span> <?= h($vendor['code']) ?><?php endif; ?></td>
++            </tr></table>
+             <?php if ($address): ?>
+                 <?= h($address['line1'] ?? '') ?><br>
+                 <?php if (!empty($address['line2'])): ?><?= h($address['line2']) ?><br><?php endif; ?>
+-                <?= h(trim(($address['city'] ?? '') . ' ' . ($address['state'] ?? '') . ' ' . ($address['pincode'] ?? ''))) ?><br>
++                <?php $cityline = trim(($address['city'] ?? '') . ' ' . ($address['state'] ?? '') . ' ' . ($address['pincode'] ?? '')); ?>
++                <?php if ($cityline !== ''): ?><?= h($cityline) ?><br><?php endif; ?>
+             <?php endif; ?>
+             <?php if ($contact): ?>
+                 Ph: <?= h($contact['phone'] ?? '') ?><br>
+-                Email: <?= h($contact['email'] ?? '') ?>
+-            <?php endif; ?>
+-            <?php if (!empty($vendor['gst_no'])): ?>
+-                <br>GST NO: <?= h($vendor['gst_no']) ?>
++                Email: <?= h($contact['email'] ?? '') ?><br>
+             <?php endif; ?>
++            <?php if (!empty($vendor['gst_no'])): ?><span class="b">GST NO:</span> <?= h($vendor['gst_no']) ?><?php endif; ?>
+         </td>
+-        <td style="width:33%; padding:5px 7px; vertical-align:top; border-right:1px solid #bbb;">
+-            <span class="lbl">Delivery Address</span>
+-            <strong><?= h($co['name']) ?></strong><br>
++        <td style="line-height:1.5;">
++            <span class="b"><?= h($co['name']) ?></span><br>
+             <?= h($co['delivery_addr1']) ?><br>
+             <?= h($co['delivery_addr2']) ?><br>
+-            GST NO: <?= h($co['gst_no']) ?>
++            <span class="b">GST NO:</span> <?= h($co['gst_no']) ?>
+         </td>
+-        <td style="width:33%; padding:5px 7px; vertical-align:top;">
+-            <span class="lbl">Billing Address</span>
+-            <strong><?= h($co['name']) ?></strong><br>
++        <td style="line-height:1.5;">
++            <span class="b"><?= h($co['name']) ?></span><br>
+             <?= h($co['billing_addr1']) ?><br>
+             <?= h($co['billing_addr2']) ?><br>
+-            GST NO: <?= h($co['gst_no']) ?>
++            <span class="b">GST NO:</span> <?= h($co['gst_no']) ?>
+         </td>
+     </tr>
+ </table>
+ 
+ <!-- Ref row -->
+-<table class="w100" style="border:1px solid #bbb; border-top:0; margin-bottom:4px;">
+-    <tr>
+-        <td style="padding:3px 7px; font-size:9px;">
+-            <strong>Ref :</strong> <?= h($poRef) ?>
+-        </td>
+-    </tr>
++<table class="grid" style="border-top:none;">
++    <tr><td style="border-top:none;"><span class="b">Ref :</span> <?= h($poRef) ?></td></tr>
+ </table>
+ 
+ <!-- Instructions -->
+-<div style="font-size:8.5px; margin-bottom:4px; line-height:1.5;">
++<div style="margin:4px 0; line-height:1.4;">
+     Please Supply the following material(s) as per the terms &amp; conditions mentioned here under and overleaf.
+     Quote our PO No. &amp; Date in all your supply documents and correspondence.
+ </div>
+ 
+-<!-- Lines table
+-     DOMPDF FIX: table-layout:fixed + <colgroup> drives all column widths.
+-     The rowspan/colspan in <thead> are structural only — no width attrs on <th>.
+-     Column total: 3+26+5+5+8+7+10+7+7+6+5+5+6 = 100% -->
++<!-- Lines table — "Rate per" sits over "Qty" only; "GST %" is its own column. -->
+ <table class="lines-tbl">
+     <colgroup>
+         <col style="width:3%;">
+-        <col style="width:26%;">
++        <col style="width:33%;">
+         <col style="width:5%;">
+         <col style="width:5%;">
+         <col style="width:8%;">
+         <col style="width:7%;">
+-        <col style="width:10%;">
+-        <col style="width:7%;">
+-        <col style="width:7%;">
++        <col style="width:9%;">
++        <col style="width:6%;">
+         <col style="width:6%;">
+         <col style="width:5%;">
++        <col style="width:4%;">
++        <col style="width:4%;">
+         <col style="width:5%;">
+-        <col style="width:6%;">
+     </colgroup>
+     <thead>
+         <tr>
+-            <th rowspan="2">Sl.</th>
+-            <th rowspan="2">Part No. and Description of Material</th>
+-            <th rowspan="2">Qty.</th>
+-            <th rowspan="2">Unit</th>
+-            <th colspan="2">Rate per</th>
+-            <th rowspan="2">Total Value in Rs.P</th>
+-            <th rowspan="2">Incoming Inspection</th>
+-            <th colspan="2">Delivery Schedule</th>
+-            <th colspan="3">Receipt details for magdyn use</th>
++            <th rowspan="2" style="width:3%;">Sl.</th>
++            <th rowspan="2" style="width:33%;">Part No. and Description of Material</th>
++            <th rowspan="2" style="width:5%;">Qty.</th>
++            <th rowspan="2" style="width:5%;">Unit</th>
++            <th rowspan="2" style="width:8%; vertical-align:middle; line-height:2.0;">Rate per<br>Qty</th>
++            <th rowspan="2" style="width:7%;">GST %</th>
++            <th rowspan="2" style="width:9%;">Total Value in Rs.P</th>
++            <th rowspan="2" style="width:6%;">Incoming Inspection</th>
++            <th colspan="2" style="width:11%;">Delivery Schedule</th>
++            <th colspan="3" style="width:13%;">Receipt details for magdyn use</th>
+         </tr>
+         <tr>
+-            <th>Qty</th>
+-            <th>GST %</th>
+-            <th>Date</th>
+-            <th>Quantity</th>
+-            <th>Date</th>
+-            <th>Quantity</th>
+-            <th>CRIN No.</th>
++            <th style="width:6%;">Date</th>
++            <th style="width:5%;">Quantity</th>
++            <th style="width:4%;">Date</th>
++            <th style="width:4%;">Quantity</th>
++            <th style="width:5%;">CRIN No.</th>
+         </tr>
+     </thead>
+     <tbody>
+-        <?php if (!$lines): ?>
+-            <tr><td colspan="13" class="ctr small" style="padding:6px;">No lines.</td></tr>
++        <?php
++        // Page 1 is the purchase order proper: only receipt lines
++        // (line_kind = 'receive') belong here. Material *issued* to the
++        // vendor (line_kind = 'ship') is listed separately on page 2
++        // ("Input Material Issued") and must not appear here, nor be folded
++        // into the PO total.
++        $receiveLines = array_values(array_filter($lines, function ($l) {
++            return ($l['line_kind'] ?? 'receive') !== 'ship';
++        }));
++        ?>
++        <?php if (!$receiveLines): ?>
++            <tr><td colspan="13" class="ctr" style="padding:6px;">No lines.</td></tr>
+         <?php else:
+-            foreach ($lines as $idx => $l):
++            foreach ($receiveLines as $idx => $l):
+                 $isAsset   = $l['entity_type'] === 'asset';
+                 $isPending = !$isAsset && empty($l['item_id']) && !empty($l['pending_name']);
+                 $code = $isAsset
+@@ -335,19 +387,23 @@ function po_render_print_html($poId, array $opts = [])
+                 if ($qtyDisp === '' || $qtyDisp === '.') $qtyDisp = '0';
+                 $totalLine = ($price !== null) ? $price * $qty : null;
+                 if ($totalLine !== null) $grandTotal += $totalLine;
+-                $delivDate = !empty($l['delivery_date']) ? h($l['delivery_date']) : '';
++                $delivDate = '';
++                if (!empty($l['delivery_date'])) {
++                    $dts = strtotime((string)$l['delivery_date']);
++                    $delivDate = $dts ? date('d-M-Y', $dts) : h($l['delivery_date']);
++                }
+         ?>
+             <tr>
+                 <td class="ctr"><?= $idx + 1 ?></td>
+-                <td><?= h($code) ?><?php if ($code !== '—' && $code !== ''): ?><br><span class="muted small"><?= h($desc) ?></span><?php endif; ?></td>
++                <td><?= h($code) ?><?php if ($code !== '—' && $code !== '' && $desc !== ''): ?> <?= h($desc) ?><?php endif; ?></td>
+                 <td class="ctr"><?= h($qtyDisp) ?></td>
+                 <td class="ctr"><?= h($l['uom_label'] ?? '—') ?></td>
+                 <td class="num"><?= $price !== null ? h(number_format($price, 2)) : '' ?></td>
+-                <td class="num"><?= $gst !== null ? h(rtrim(rtrim((string)$gst, '0'), '.')) : '' ?></td>
+-                <td class="num"><?= $totalLine !== null ? h(number_format($totalLine, 2)) : '' ?></td>
++                <td class="num"><?= $gst !== null ? h(rtrim(rtrim((string)$gst, '0'), '.')) : '0' ?></td>
++                <td class="num"><?= $totalLine !== null ? h(number_format($totalLine, 2)) : '0.00' ?></td>
+                 <td class="ctr"></td><!-- Incoming Inspection -->
+                 <td class="ctr"><?= $delivDate ?></td>
+-                <td class="num"><?= h($qtyDisp) ?></td>
++                <td class="ctr"><?= h($qtyDisp) ?></td>
+                 <td class="ctr"></td><!-- Receipt Date -->
+                 <td class="ctr"></td><!-- Receipt Quantity -->
+                 <td class="ctr"></td><!-- CRIN No. -->
+@@ -355,85 +411,80 @@ function po_render_print_html($poId, array $opts = [])
+         <?php endforeach; endif; ?>
+     </tbody>
+     <tfoot>
++        <?php
++            // Fold any numeric Packing & Forwarding / Freight & Insurance
++            // charge into the printed PO total.
++            $totalAmount = $grandTotal + ($packFwdAmt ?? 0) + ($freightInsAmt ?? 0);
++        ?>
+         <tr>
+-            <td colspan="6" class="r" style="font-size:9px; font-weight:bold;">TOTAL Amount</td>
+-            <td class="num"><?= $grandTotal > 0 ? h(number_format($grandTotal, 2)) : '0' ?></td>
++            <td colspan="6" class="r b">TOTAL Amount</td>
++            <td class="num b"><?= $totalAmount > 0 ? h(number_format($totalAmount, 2)) : '0' ?></td>
+             <td colspan="6"></td>
+         </tr>
+     </tfoot>
+ </table>
+ 
+-<!-- Payment / Packing / Freight / Notes — four equal columns
+-     Using explicit border on each cell instead of border-left:0 shorthand
+-     (dompdf border-collapse + asymmetric borders can misrender). -->
+-<table class="w100 foot-table" style="margin-top:4px; border-collapse:collapse;">
++<!-- Payment / Packing / Freight / Notes — lavender labels row + white values row -->
++<table class="grid" style="border-top:none;">
++    <colgroup><col style="width:25%;"><col style="width:25%;"><col style="width:25%;"><col style="width:25%;"></colgroup>
+     <tr>
+-        <td style="width:25%; vertical-align:top; border:1px solid #bbb; padding:4px 6px;">
+-            <span class="lbl">Payment terms</span>
+-            <?= h($paymentTerms) ?>
+-        </td>
+-        <td style="width:25%; vertical-align:top; border-top:1px solid #bbb; border-right:1px solid #bbb; border-bottom:1px solid #bbb; padding:4px 6px;">
+-            <span class="lbl">Packing &amp; Forwarding</span>
+-            <?= h($packFwd) ?>
+-        </td>
+-        <td style="width:25%; vertical-align:top; border-top:1px solid #bbb; border-right:1px solid #bbb; border-bottom:1px solid #bbb; padding:4px 6px;">
+-            <span class="lbl">Freight &amp; Insurance</span>
+-            <?= h($freightIns) ?>
+-        </td>
+-        <td style="width:25%; vertical-align:top; border-top:1px solid #bbb; border-right:1px solid #bbb; border-bottom:1px solid #bbb; padding:4px 6px;">
+-            <span class="lbl">NOTES</span>
+-        </td>
++        <td class="lav b" style="border-top:none;">Payment terms</td>
++        <td class="lav b" style="border-top:none;">Packing &amp; Forwarding</td>
++        <td class="lav b" style="border-top:none;">Freight &amp; Insurance</td>
++        <td class="lav b" style="border-top:none;">NOTES</td>
++    </tr>
++    <tr>
++        <td><?= h($paymentTerms) ?>&nbsp;</td>
++        <td><?= h($packFwd) ?>&nbsp;</td>
++        <td><?= h($freightIns) ?>&nbsp;</td>
++        <td>&nbsp;</td>
+     </tr>
+ </table>
+ 
+-<!-- Special Instructions -->
+-<table class="w100" style="margin-top:2px; border-collapse:collapse;">
++<!-- Special Instructions / Enclosures : lavender label + white value -->
++<table class="grid" style="border-top:none;">
++    <colgroup><col style="width:18%;"><col style="width:82%;"></colgroup>
+     <tr>
+-        <td style="border:1px solid #bbb; padding:3px 6px; font-size:9px;">
+-            <strong>Special Instructions</strong><br>
+-            <?= h($specialInst) ?>
+-        </td>
++        <td class="lav b" style="border-top:none;">Special Instructions</td>
++        <td style="border-top:none;"><?= h($specialInst) ?>&nbsp;</td>
+     </tr>
+     <tr>
+-        <td style="border-left:1px solid #bbb; border-right:1px solid #bbb; border-bottom:1px solid #bbb; padding:3px 6px; font-size:9px;">
+-            <strong>Enclosures to this PO.</strong>
+-        </td>
++        <td class="lav b">Enclosures to this PO.</td>
++        <td>&nbsp;</td>
+     </tr>
+ </table>
+ 
+-<!-- Footer: despatch / signatory -->
+-<table class="w100" style="margin-top:6px; border-collapse:collapse; font-size:9px;">
++<!-- Footer grid: despatch / buyer / approved + signatory box with sign & seal -->
++<table class="grid" style="border-top:none;">
++    <colgroup>
++        <col style="width:18%;"><col style="width:28%;"><col style="width:10%;"><col style="width:17%;"><col style="width:27%;">
++    </colgroup>
+     <tr>
+-        <td style="width:60%; vertical-align:top; padding:3px 0;">
+-            Confirm Despatch by email to
+-            <strong><?= h($co['despatch_email']) ?></strong>
+-        </td>
+-        <td style="width:40%; text-align:right; vertical-align:top; padding:3px 0;">
+-            <strong>For <?= h($co['name']) ?>,</strong><br><br><br>
+-            <span style="border-top:1px solid #555; padding-top:3px;">Authorised Signatory</span>
+-        </td>
++        <td class="lav" style="border-top:none;">Confirm Despatch by email to</td>
++        <td colspan="3" style="border-top:none;"><span class="b"><?= h($co['despatch_email']) ?></span></td>
++        <td class="lav c b" style="border-top:none;">For <?= h($co['name']) ?>,</td>
+     </tr>
+     <tr>
+-        <td style="vertical-align:top; padding:3px 0; font-size:9px;">
+-            Project Code / Job Code<br><br>
+-            Budget Code
+-        </td>
+-        <td style="vertical-align:top; text-align:right; padding:3px 0; font-size:9px;">
+-            Buyer &nbsp;&nbsp; <?= h($buyerDisplay) ?>
+-        </td>
++        <td class="lav">Project Code / Job Code</td>
++        <td>&nbsp;</td>
++        <td class="lav">Buyer</td>
++        <td><?= h($buyerDisplay) ?>&nbsp;</td>
++        <td rowspan="2" class="c" style="vertical-align:middle; padding:2px;"><?= $signHtml ?></td>
+     </tr>
+     <tr>
+-        <td style="vertical-align:top; padding:3px 0; font-size:9px;">
+-            Notes for Internal Use<br>
+-            <span class="muted"><?= nl2br(h($internalNotes)) ?></span>
+-        </td>
+-        <td style="vertical-align:top; text-align:right; padding:3px 0; font-size:9px;">
+-            Approved By <?= h(magdyn_setting('po.default_approver', '')) ?>
+-        </td>
++        <td class="lav">Budget Code</td>
++        <td>&nbsp;</td>
++        <td class="lav">Approved By</td>
++        <td><?= h(magdyn_setting('po.default_approver', '')) ?>&nbsp;</td>
++    </tr>
++    <tr>
++        <td class="lav">Notes for Internal Use</td>
++        <td colspan="3"><?= h($internalNotes) ?>&nbsp;</td>
++        <td class="lav c b">Authorised Signatory</td>
+     </tr>
+ </table>
+ 
+-<div style="text-align:right; font-size:8px; color:#888; margin-top:4px;">Page 1 of 3</div>
++<div class="pageno">Page 1 of 3</div>
+ 
+ <!-- ═══════════════════════════════════════════════════════════
+      PAGE 2 — INPUT MATERIAL ISSUED
+@@ -442,46 +493,58 @@ function po_render_print_html($poId, array $opts = [])
+ 
+ <div style="font-size:12px; font-weight:bold; margin-bottom:6px;">Input Material Issued</div>
+ <table class="imt-tbl">
++    <colgroup><col style="width:6%;"><col style="width:66%;"><col style="width:10%;"><col style="width:18%;"></colgroup>
+     <thead>
+         <tr>
+-            <th style="width:5%;">Sl.</th>
++            <th>Sl.</th>
+             <th>Part No. and Description of Material</th>
+-            <th style="width:10%;">Qty.</th>
+-            <th style="width:18%;">Date</th>
++            <th>Qty.</th>
++            <th>Date</th>
+         </tr>
+     </thead>
+     <tbody>
+         <?php
+-        // Show only material actually issued/shipped to the vendor
+-        // (qty_shipped > 0). When nothing has shipped yet, the section is
+-        // intentionally left empty.
++        // List every shipment line (line_kind = 'ship') — the material
++        // issued, or to be issued, to the vendor. This is the *only* place
++        // ship lines appear; the page-1 PO table shows receipt lines alone.
++        // Quantity shows what was actually issued (qty_shipped) once shipped,
++        // falling back to the planned issue qty before that.
+         $imIdx = 0;
+         foreach ($lines as $l):
+-            if ((float)($l['qty_shipped'] ?? 0) <= 0) continue;
++            if (($l['line_kind'] ?? '') !== 'ship') continue;
+             $isAsset = $l['entity_type'] === 'asset';
+             $code = $isAsset ? ($l['asset_tag'] ?: '—') : ($l['item_code'] ?: '—');
+             $desc = $isAsset ? ($l['asset_model'] ?: '') : ($l['item_name'] ?: ($l['pending_name'] ?? ''));
+-            $qty  = rtrim(rtrim(number_format((float)($l['qty_shipped'] ?? 0), 2), '0'), '.');
+-            $lineDate = !empty($l['delivery_date']) ? h($l['delivery_date']) : '';
++            $issuedQty = (float)($l['qty_shipped'] ?? 0);
++            if ($issuedQty <= 0) $issuedQty = (float)($l['qty_planned'] ?? 0);
++            $qty  = rtrim(rtrim(number_format($issuedQty, 2), '0'), '.');
++            $lineDate = '';
++            if (!empty($l['delivery_date'])) {
++                $dts = strtotime((string)$l['delivery_date']);
++                $lineDate = $dts ? date('d-M-Y', $dts) : h($l['delivery_date']);
++            }
+         ?>
+             <tr>
+-                <td class="ctr"><?= ++$imIdx ?></td>
+-                <td><?= h($code) ?><?= $desc ? ' — ' . h($desc) : '' ?></td>
+-                <td class="ctr"><?= h($qty) ?></td>
+-                <td class="ctr"><?= $lineDate ?></td>
++                <td class="c"><?= ++$imIdx ?></td>
++                <td><?= h($code) ?><?= $desc ? ' ' . h($desc) : '' ?></td>
++                <td class="c"><?= h($qty) ?></td>
++                <td class="c"><?= $lineDate ?></td>
+             </tr>
+         <?php endforeach; ?>
++        <?php if ($imIdx === 0): ?>
++            <tr><td class="c">&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>
++        <?php endif; ?>
+     </tbody>
+ </table>
+ 
+-<div style="text-align:right; font-size:8px; color:#888; margin-top:8px;">Page 2 of 3</div>
++<div class="pageno">Page 2 of 3</div>
+ 
+ <!-- ═══════════════════════════════════════════════════════════
+-     PAGE 3 — TERMS & CONDITIONS
++     PAGE 3 — TERMS & CONDITIONS  (monospace, like the template)
+      ═══════════════════════════════════════════════════════════ -->
+ <div class="page-break"></div>
+ 
+-<div style="text-align:center; font-size:12px; font-weight:bold; margin-bottom:10px; text-decoration:underline;">Terms &amp; Conditions</div>
++<div class="tc-title">Terms &amp; Conditions</div>
+ 
+ <?php
+ $standardTerms = [
+@@ -497,23 +560,22 @@ $standardTerms = [
+     'Any dispute relating to this Purchase Order shall be deemed to have arisen in Tamil Nadu State and shall be subject to the adjudication by a competent Court in Chennai, Tamil Nadu State. India.',
+ ];
+ 
+-// Use custom terms if configured, otherwise use the 10 standard points.
+-$customTerms = (string)($shipment['terms_conditions'] ?? '') !== ''
+-             ? $shipment['terms_conditions']
+-             : magdyn_setting('shiprcpt.terms_conditions', '');
++// Resolved earlier: per-shipment snapshot → legacy notes-stored T&C →
++// system default. Falls through to the 10 standard points when all empty.
++$customTerms = $tcText;
+ ?>
+ 
+ <?php if ($customTerms !== ''): ?>
+-    <div style="font-size:9px; line-height:1.6; white-space:pre-wrap;"><?= h($customTerms) ?></div>
++    <div style="font-family:'Courier New',Courier,monospace; font-size:9px; line-height:1.5; white-space:pre-wrap;"><?= h($customTerms) ?></div>
+ <?php else: ?>
+-    <ol class="tc-list">
+-        <?php foreach ($standardTerms as $tc): ?>
+-            <li><?= h($tc) ?></li>
++    <table class="tc-tbl">
++        <?php foreach ($standardTerms as $i => $tc): ?>
++            <tr><td class="n"><?= ($i + 1) ?>.</td><td><?= h($tc) ?></td></tr>
+         <?php endforeach; ?>
+-    </ol>
++    </table>
+ <?php endif; ?>
+ 
+-<div style="text-align:right; font-size:8px; color:#888; margin-top:8px;">Page 3 of 3</div>
++<div class="pageno">Page 3 of 3</div>
+ 
+ </div><!-- /.po-wrap -->
+ </body>
+diff --git a/includes/sso.php b/includes/sso.php
+index 9a2f03f..4e90a9b 100644
+--- a/includes/sso.php
++++ b/includes/sso.php
+@@ -5,6 +5,7 @@
+  * The intent: keep the local username/password flow as the default while
+  * giving you the bare minimum surface area to wire one of these in later:
+  *
++ *   - MAGDYN : MagDyn central SSO server (OAuth-style code flow via SSOClient)
+  *   - OIDC : Authorisation Code flow (Google, Azure AD, Keycloak, etc.)
+  *   - SAML : SP-initiated SAML 2.0 (use a library like onelogin/php-saml)
+  *   - HEADER : Trusted reverse-proxy header injection
+@@ -128,7 +129,92 @@ function sso_complete_sign_in(array $claims)
+     }
+ 
+     auth_sign_in($user['id']);
+-    redirect(url('/index.php'));
++    // Honour where the user was heading before being bounced to SSO.
++    $ret = $_SESSION['_return_to'] ?? ($_SESSION['sso_return_to'] ?? '');
++    unset($_SESSION['_return_to'], $_SESSION['sso_return_to']);
++    redirect($ret ?: url('/index.php'));
++}
++
++/* ---------- MagDyn central SSO server (via SSOClient.php) ----------
++   Authentication only: the SSO server confirms WHO the user is; MagDyn's own
++   roles/permissions tables continue to govern WHAT they may do. New users are
++   matched/auto-provisioned by sso_complete_sign_in() above. */
++
++/** Build the SSOClient config, auto-deriving redirect_uri when left blank. */
++function sso_magdyn_config()
++{
++    $cfg = $GLOBALS['APP']['sso']['magdyn'] ?? [];
++    if (empty($cfg['redirect_uri'])) {
++        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
++        $host  = $_SERVER['HTTP_HOST'] ?? 'localhost';
++        $base  = rtrim($GLOBALS['APP']['base_url'], '/');
++        $cfg['redirect_uri'] = $proto . '://' . $host . $base . '/sso_callback.php';
++    }
++    return $cfg;
++}
++
++/** Instantiate the client, or throw a clear error if not yet configured. */
++function sso_magdyn_client()
++{
++    require_once __DIR__ . '/SSOClient.php';
++    $cfg = sso_magdyn_config();
++    foreach (['sso_base_url', 'client_id', 'client_secret'] as $k) {
++        if (empty($cfg[$k])) {
++            throw new RuntimeException(
++                'MagDyn SSO is not configured yet: set "' . $k . '" in config/app.config.php (sso.magdyn).'
++            );
++        }
++    }
++    return new SSOClient($cfg);
++}
++
++function sso_magdyn_begin()
++{
++    try {
++        $client = sso_magdyn_client();
++    } catch (Throwable $e) {
++        flash_set('error', $e->getMessage());
++        redirect(url('/login.php'));
++    }
++    $returnTo = $_SESSION['_return_to'] ?? url('/index.php');
++    $client->login($returnTo); // redirects to the SSO server and exits
++}
++
++function sso_magdyn_callback()
++{
++    try {
++        $client = sso_magdyn_client();
++        $user   = $client->handle_callback(); // validates state + exchanges code; throws on failure
++    } catch (Throwable $e) {
++        flash_set('error', 'SSO sign-in failed: ' . $e->getMessage());
++        redirect(url('/login.php'));
++    }
++    // Bridge the SSO identity into MagDyn's user/RBAC system.
++    return [
++        'subject' => (string)($user['id'] ?? ''),
++        'email'   => (string)($user['email'] ?? ''),
++        'name'    => (string)($user['full_name'] ?? ($user['username'] ?? '')),
++    ];
++}
++
++/**
++ * If the current session was established via the MagDyn SSO server, return the
++ * central logout URL (so logout.php can end the global session too). Otherwise
++ * null — local sign-ins just clear the local session.
++ */
++function sso_logout_url()
++{
++    if (sso_mode() !== 'magdyn') return null;
++    if (empty($_SESSION['sso_access_token'])) return null;
++    $cfg = sso_magdyn_config();
++    if (empty($cfg['sso_base_url'])) return null;
++
++    $proto  = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
++    $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
++    $base   = rtrim($GLOBALS['APP']['base_url'], '/');
++    $return = $proto . '://' . $host . $base . '/login.php';
++
++    return rtrim($cfg['sso_base_url'], '/') . '/logout.php?' . http_build_query(['redirect' => $return]);
+ }
+ 
+ /* ---------- Header-based SSO (simplest mode) ---------- */
+diff --git a/inspection.php b/inspection.php
+index 5336e85..aa61821 100644
+--- a/inspection.php
++++ b/inspection.php
+@@ -716,6 +716,70 @@ if ($action === 'delete_old_templates') {
+     redirect(url('/inspection.php?action=import_old_templates'));
+ }
+ 
++// ── POST: restore ONE template's bubbles from the old inventory server ───────
++// Targeted counterpart to the full import: rebuilds a single OINS-<pid>
++// template's checklist items from the legacy `inspection` table. Use case —
++// a template that lost rows (e.g. a save truncated by PHP max_input_vars) is
++// restored from the source of truth without re-running the whole import or
++// disturbing any other template.
++if ($action === 'restore_template_bubbles') {
++    require_permission('inspection', 'create');
++    csrf_check();
++    @set_time_limit(0);
++
++    require_once __DIR__ . '/includes/old_inventory_api.php';
++    require_once __DIR__ . '/services/OldInventoryInspectionTemplateImportService.php';
++
++    $prefix = OldInventoryInspectionTemplateImportService::CODE_PREFIX;
++    $code   = trim((string)input('code', ''));
++
++    // Accept either the full template code (OINS-1928) or a bare pid (1928).
++    $pid = (strncasecmp($code, $prefix, strlen($prefix)) === 0)
++         ? substr($code, strlen($prefix))
++         : $code;
++    $pid = trim($pid);
++
++    if ($pid === '') {
++        flash_set('error', 'Pick a template to restore.');
++        redirect(url('/inspection.php?action=import_old_templates'));
++    }
++
++    $fullCode = $prefix . $pid;
++    $tpl = db_one('SELECT id, name FROM inspection_templates WHERE code = ?', [$fullCode]);
++    if (!$tpl) {
++        flash_set('error', "No imported template with code {$fullCode} exists.");
++        redirect(url('/inspection.php?action=import_old_templates'));
++    }
++
++    $before = (int)db_val('SELECT COUNT(*) FROM inspection_template_items WHERE template_id = ?', [(int)$tpl['id']], 0);
++
++    try {
++        $svc = new OldInventoryInspectionTemplateImportService((int)current_user_id());
++        $svc->buildLookupMaps();
++        $rows = $svc->fetchRowsForPid($pid);
++
++        // Refuse to rebuild from an empty source — importTemplate deletes the
++        // existing items first, so an empty fetch would wipe the template.
++        if (empty($rows)) {
++            flash_set('error',
++                "The old inventory server returned no `inspection` rows for pid {$pid}, "
++              . "so {$fullCode} was left unchanged (refusing to wipe its existing "
++              . "{$before} bubble(s)). Check the source data or connectivity.");
++            redirect(url('/inspection.php?action=import_old_templates'));
++        }
++
++        $svc->importTemplate($pid, $rows);
++        $after = (int)db_val('SELECT COUNT(*) FROM inspection_template_items WHERE template_id = ?', [(int)$tpl['id']], 0);
++
++        flash_set('success',
++            "Restored {$fullCode} — bubbles {$before} → {$after} (from "
++          . count($rows) . " source row(s)).");
++    } catch (Throwable $e) {
++        flash_set('error', "Restore failed for {$fullCode}: " . $e->getMessage());
++    }
++    redirect(url('/inspection.php?action=import_old_templates'));
++}
++
+ // ── POST: run the old-inventory inspection-template import ───────────────────
+ if ($action === 'import_old_templates_run') {
+     require_permission('inspection', 'create');
+@@ -855,6 +919,18 @@ if ($action === 'import_old_templates') {
+     $localImported = (int)db_val('SELECT COUNT(*) FROM inspection_templates WHERE code LIKE ?', [$prefix . '%'], 0);
+     $localTotal    = (int)db_val('SELECT COUNT(*) FROM inspection_templates', [], 0);
+ 
++    // Imported templates (with current bubble counts) for the single-template
++    // "Restore bubbles" picker. Newest first; the count lets the user spot a
++    // template that looks short of what its drawing should carry.
++    $importedTemplates = db_all(
++        "SELECT t.id, t.code, t.name,
++                (SELECT COUNT(*) FROM inspection_template_items i WHERE i.template_id = t.id) AS item_count
++           FROM inspection_templates t
++          WHERE t.code LIKE ?
++          ORDER BY t.created_at DESC, t.id DESC",
++        [$prefix . '%']
++    );
++
+     $page_title  = 'Import Inspection Templates';
+     $page_module = 'inspection';
+     require __DIR__ . '/includes/header.php';
+@@ -1038,13 +1114,58 @@ if ($action === 'import_old_templates') {
+             <?php endif; ?>
+ 
+             <?php if (!$apiError): ?>
++            <!-- Restore a SINGLE template's bubbles from the old server -->
++            <h3 style="margin:0 0 10px;">Restore One Template's Bubbles</h3>
++            <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:16px 20px;margin-bottom:24px;">
++                <p style="margin:0 0 12px;font-size:14px;color:#075985;">
++                    Rebuild a single imported template's checklist from the legacy
++                    <code>inspection</code> table — useful when a template lost rows (e.g. a save
++                    truncated by the server's input limit). Only the chosen template is touched;
++                    its bubbles are deleted and re-created from the source of truth.
++                </p>
++                <?php if (!$importedTemplates): ?>
++                    <p class="muted small" style="margin:0;">No imported templates yet — run the full import first.</p>
++                <?php else: ?>
++                <form method="post" action="<?= h(url('/inspection.php?action=restore_template_bubbles')) ?>"
++                      style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;"
++                      onsubmit="var s=this.querySelector('select'); return confirm('Restore bubbles for '+s.value+' from the old inventory server?\n\nIts current checklist will be replaced with the source data.');">
++                    <?= csrf_field() ?>
++                    <select name="code" required class="no-combobox" style="min-width:340px;max-width:100%;">
++                        <?php foreach ($importedTemplates as $t): ?>
++                            <option value="<?= h($t['code']) ?>">
++                                <?= h($t['code'] . ' — ' . $t['name']) ?>
++                                (<?= (int)$t['item_count'] ?> bubble<?= (int)$t['item_count'] === 1 ? '' : 's' ?>)
++                            </option>
++                        <?php endforeach; ?>
++                    </select>
++                    <button type="submit" class="btn btn-primary">⟲ Restore Bubbles</button>
++                </form>
++                <?php endif; ?>
++
++                <hr style="border:none;border-top:1px solid #bae6fd;margin:16px 0;">
++                <p style="margin:0 0 12px;font-size:14px;color:#075985;">
++                    <strong>Restore ALL templates</strong> — rebuild every imported
++                    (<code><?= h($prefix) ?>%</code>) template's checklist from the old server in one pass.
++                    Downloaded and applied in batches with a live progress bar, so a large source
++                    won't time out. Equivalent to a full re-import; hand-built templates are untouched.
++                </p>
++                <button type="button" class="btn btn-primary js-tpl-import-run" id="tpl-restore-all-btn"
++                        data-url="<?= h(url('/inspection.php?action=import_old_templates_chunk')) ?>"
++                        data-templates-url="<?= h(url('/inspection.php?action=templates')) ?>"
++                        data-total-rows="<?= (int)$srcRows ?>"
++                        data-confirm="Restore ALL imported templates from the old inventory server? Every imported template's checklist will be rebuilt from source."
++                        data-csrf-name="<?= h($GLOBALS['APP']['csrf_field']) ?>"
++                        data-csrf-token="<?= h(csrf_token()) ?>">⟲ Restore All Bubbles</button>
++            </div>
++
+             <!-- Run import (chunked, AJAX-driven with a live progress bar) -->
+             <h3 style="margin:0 0 10px;">Run Import</h3>
+             <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;">
+-                <button type="button" class="btn btn-primary" id="tpl-import-run-btn"
++                <button type="button" class="btn btn-primary js-tpl-import-run" id="tpl-import-run-btn"
+                         data-url="<?= h(url('/inspection.php?action=import_old_templates_chunk')) ?>"
+                         data-templates-url="<?= h(url('/inspection.php?action=templates')) ?>"
+                         data-total-rows="<?= (int)$srcRows ?>"
++                        data-confirm="Import all inspection templates from the old system? Existing imported templates (same pid) will be rebuilt."
+                         data-csrf-name="<?= h($GLOBALS['APP']['csrf_field']) ?>"
+                         data-csrf-token="<?= h(csrf_token()) ?>">▶ Import Templates</button>
+                 <a class="btn btn-ghost" href="<?= h(url('/inspection.php?action=templates')) ?>">Cancel</a>
+@@ -1078,8 +1199,10 @@ if ($action === 'import_old_templates') {
+ 
+             <script>
+             (function () {
+-                var btn = document.getElementById('tpl-import-run-btn');
+-                if (!btn) return;
++                // Both the "Import Templates" and "Restore All Bubbles" buttons
++                // drive the same chunked rebuild and share one progress widget.
++                var buttons = document.querySelectorAll('.js-tpl-import-run');
++                if (!buttons.length) return;
+                 var widget   = document.getElementById('tpl-import-progress');
+                 var bar      = document.getElementById('tpl-import-bar');
+                 var pctEl    = document.getElementById('tpl-import-pct');
+@@ -1087,11 +1210,11 @@ if ($action === 'import_old_templates') {
+                 var statsEl  = document.getElementById('tpl-import-stats');
+                 var doneEl   = document.getElementById('tpl-import-done');
+                 var errEl    = document.getElementById('tpl-import-err');
+-                var totalRows = parseInt(btn.dataset.totalRows, 10) || 0;
++                var running  = false;
+ 
+                 function fmt(n) { return (n || 0).toLocaleString(); }
+ 
+-                async function post(params) {
++                async function post(btn, params) {
+                     var body = new URLSearchParams();
+                     Object.keys(params).forEach(function (k) { body.append(k, params[k]); });
+                     body.append(btn.dataset.csrfName, btn.dataset.csrfToken);
+@@ -1117,22 +1240,29 @@ if ($action === 'import_old_templates') {
+                         'unmatched: ' + fmt(c.pid_unmatched);
+                 }
+ 
+-                btn.addEventListener('click', async function () {
+-                    if (!confirm('Import all inspection templates from the old system?\n\nExisting imported templates (same pid) will be rebuilt.')) return;
+-                    btn.disabled = true;
+-                    btn.textContent = '⏳ Importing…';
++                async function run(btn) {
++                    if (running) return;
++                    if (!confirm(btn.dataset.confirm || 'Rebuild all imported templates from the old system?')) return;
++                    running = true;
++                    var origText = btn.dataset.origText;
++                    // Disable every trigger while one import is in flight.
++                    buttons.forEach(function (b) { b.disabled = true; });
++                    btn.textContent = '⏳ Working…';
+                     widget.style.display = 'block';
++                    widget.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                     errEl.style.display = 'none';
+                     doneEl.style.display = 'none';
+-                    labelEl.textContent = 'Importing…';
++                    labelEl.textContent = 'Working…';
++                    setBar(0);
+ 
++                    var totalRows = parseInt(btn.dataset.totalRows, 10) || 0;
+                     // Running totals across chunks (each chunk returns its own tally).
+                     var totals = { tpl_created:0, tpl_updated:0, item_created:0,
+                                    target_linked:0, pid_matched:0, pid_unmatched:0, pid_failed:0 };
+                     var offset = 0, done = false;
+                     try {
+                         while (!done) {
+-                            var d = await post({ action: 'import_old_templates_chunk', offset: offset });
++                            var d = await post(btn, { action: 'import_old_templates_chunk', offset: offset });
+                             Object.keys(totals).forEach(function (k) { totals[k] += (d.counts[k] || 0); });
+                             showStats(totals);
+                             var pct = totalRows > 0 ? Math.min(99, Math.round(d.next_offset / totalRows * 100)) : 0;
+@@ -1144,20 +1274,26 @@ if ($action === 'import_old_templates') {
+                             done = d.done;
+                         }
+                         setBar(100);
+-                        labelEl.textContent = 'Import complete';
++                        labelEl.textContent = 'Restore complete';
+                         doneEl.innerHTML = '✅ Done — ' + fmt(totals.tpl_created) + ' created, ' +
+                             fmt(totals.tpl_updated) + ' updated, ' + fmt(totals.item_created) + ' items. ' +
+                             '<a href="' + btn.dataset.templatesUrl + '" style="font-weight:700;">View Templates →</a>';
+                         doneEl.style.display = 'block';
+                         btn.textContent = '✅ Done — run again?';
+-                        btn.disabled = false;
+                     } catch (e) {
+                         errEl.textContent = '❌ ' + e.message;
+                         errEl.style.display = 'block';
+-                        labelEl.textContent = 'Import failed';
+-                        btn.textContent = '▶ Import Templates';
+-                        btn.disabled = false;
++                        labelEl.textContent = 'Restore failed';
++                        btn.textContent = origText;
++                    } finally {
++                        running = false;
++                        buttons.forEach(function (b) { b.disabled = false; });
+                     }
++                }
++
++                buttons.forEach(function (btn) {
++                    btn.dataset.origText = btn.textContent;
++                    btn.addEventListener('click', function () { run(btn); });
+                 });
+             })();
+             </script>
+@@ -1729,12 +1865,37 @@ if ($action === 'save') {
+             }
+         }
+ 
++        // Template chosen in the Start-Inspection modal. Only honour a
++        // template that is actually linked to this inspection's item/asset
++        // target, so a tampered form can't repoint the inspection at an
++        // unrelated template.
++        $chosenTpl = (int)input('template_id', 0);
++        if ($chosenTpl > 0) {
++            $tgt = ir_template_target_entity($row);
++            $ok  = $tgt['type'] && $tgt['id'] && (int)db_val(
++                "SELECT t.id FROM inspection_template_targets tt
++                   JOIN inspection_templates t ON t.id = tt.template_id AND t.is_active = 1
++                  WHERE tt.entity_type = ? AND tt.entity_id = ? AND t.id = ?
++                  LIMIT 1",
++                [$tgt['type'], $tgt['id'], $chosenTpl], 0
++            );
++            if (!$ok) $chosenTpl = 0;
++        }
++
+         $oldSamples = max(1, (int)($row['sample_count'] ?? 1));
++        $oldTpl     = (int)($row['template_id'] ?? 0);
++        $newTpl     = $chosenTpl ?: $oldTpl;
++
++        if ($newTpl !== $oldTpl) {
++            db_exec('UPDATE inspections SET template_id = ? WHERE id = ?', [$newTpl ?: null, $id]);
++        }
+         if ($samplesTaken !== $oldSamples) {
+             db_exec('UPDATE inspections SET sample_count = ? WHERE id = ?', [$samplesTaken, $id]);
+-            if ($row['template_id']) {
+-                ir_seed_results_with_samples($id, (int)$row['template_id'], $samplesTaken);
+-            }
++        }
++        // Re-seed the checklist whenever the template or the sample count
++        // changed — both alter the set of result rows the inspector edits.
++        if ($newTpl && ($newTpl !== $oldTpl || $samplesTaken !== $oldSamples)) {
++            ir_seed_results_with_samples($id, $newTpl, $samplesTaken);
+         }
+ 
+         redirect(url('/inspection.php?action=execute&id=' . $id
+@@ -1969,6 +2130,7 @@ if ($action === 'template_save') {
+ 
+     if ($op === 'upsert') {
+         $id          = (int)input('id', 0);
++
+         // Code is system-controlled — auto-generated on create, immutable on edit.
+         // The form may submit a value but we ignore it.
+         if ($id > 0) {
+@@ -2669,6 +2831,73 @@ if ($action === 'template_export') {
+     exit;
+ }
+ 
++// =================================================================
++// TEMPLATE BUBBLE-DATA EXPORT — CSV in the "Import bubble data" format
++// =================================================================
++// Counterpart to the template editor's "⊕ Import bubble data (CSV)"
++// button (see importBubbleCsv() in the template-edit script). Emits the
++// SAME column set that importer recognises, so a template's checklist
++// can be exported and re-imported as bubble data into the same or a
++// different template:
++//   bubbleno, parametername, unitofmeasure, nomvalue, tolneg, tolpos,
++//   minimum, maximum, toltype, processtype, howmeasure, notes
++// toltype is the raw check_type (importBubbleCsv's mapCheckType() accepts
++// it verbatim); spec values land in the nom/tol vs min/max columns exactly
++// as importBubbleCsv reads them back, so the round-trip is lossless for
++// every field the bubble-data format carries.
++if ($action === 'template_export_bubbles') {
++    require_permission('inspection', 'view');
++    $id  = (int)input('id', 0);
++    $tpl = $id > 0 ? db_one('SELECT * FROM inspection_templates WHERE id = ?', [$id]) : null;
++    if (!$tpl) {
++        flash_set('error', 'Template not found.');
++        redirect(url('/inspection.php?action=templates'));
++    }
++    $items = db_all(
++        'SELECT * FROM inspection_template_items
++          WHERE template_id = ? ORDER BY sort_order, id',
++        [$id]
++    );
++    // Filename: TPL-001-rough-name-bubbles.csv
++    $slug = preg_replace('/[^A-Za-z0-9._-]+/', '_', $tpl['code'] . '-' . $tpl['name'] . '-bubbles');
++    header('Content-Type: text/csv; charset=utf-8');
++    header('Content-Disposition: attachment; filename="' . $slug . '.csv"');
++    // BOM so Excel reads UTF-8 correctly (same as template_export above).
++    echo "\xEF\xBB\xBF";
++    $out = fopen('php://output', 'w');
++    fputcsv($out, ['bubbleno', 'parametername', 'unitofmeasure', 'nomvalue',
++                   'tolneg', 'tolpos', 'minimum', 'maximum', 'toltype',
++                   'processtype', 'howmeasure', 'notes']);
++    foreach ($items as $it) {
++        $type   = (string)$it['check_type'];
++        // Where each item's spec values live mirrors importBubbleCsv:
++        //   min-max / logical-min-max → minimum / maximum
++        //   nom / logical-nom / numeric → nomvalue / tolneg / tolpos
++        //   everything else → no spec columns
++        $isMin  = ($type === 'min-max' || $type === 'logical-min-max');
++        $isNom  = ($type === 'nom' || $type === 'logical-nom' || $type === 'numeric');
++        $lower  = $it['tolerance_lower'] !== null ? $it['tolerance_lower'] : '';
++        $upper  = $it['tolerance_upper'] !== null ? $it['tolerance_upper'] : '';
++        $target = $it['target_value']   !== null ? $it['target_value']   : '';
++        fputcsv($out, [
++            $it['bubble_no'] ?? '',                 // bubbleno
++            $it['label'],                           // parametername
++            $it['unit'] ?? '',                      // unitofmeasure
++            $isNom ? $target : '',                  // nomvalue
++            $isNom ? $lower  : '',                  // tolneg
++            $isNom ? $upper  : '',                  // tolpos
++            $isMin ? $lower  : '',                  // minimum
++            $isMin ? $upper  : '',                  // maximum
++            $type,                                  // toltype (raw check_type)
++            '',                                     // processtype — not stored separately
++            '',                                     // howmeasure  — not stored separately
++            $it['notes'] ?? '',                     // notes
++        ]);
++    }
++    fclose($out);
++    exit;
++}
++
+ // =================================================================
+ // TEMPLATE IMPORT — accept a CSV upload, create a new template
+ // =================================================================
+@@ -2867,7 +3096,22 @@ if ($action === 'templates') {
+             "SELECT t.*, u.full_name AS creator_name,
+                     (SELECT COUNT(*) FROM inspection_template_items WHERE template_id = t.id) AS item_count,
+                     (SELECT COUNT(*) FROM inspections WHERE template_id = t.id AND is_deleted = 0) AS use_count,
+-                    (SELECT COUNT(*) FROM inspection_template_targets WHERE template_id = t.id) AS target_count
++                    (SELECT COUNT(*) FROM inspection_template_targets WHERE template_id = t.id) AS target_count,
++                    -- Linked targets as type/id/code triples, joined so we can
++                    -- render each as a link to its item/asset view page.
++                    -- Fields separated by 0x1f, records by 0x1e (rare control
++                    -- chars that won't collide with codes/asset tags).
++                    (SELECT GROUP_CONCAT(
++                                CONCAT_WS(0x1f, tt.entity_type, tt.entity_id,
++                                    COALESCE(
++                                        CASE WHEN tt.entity_type = 'asset'    THEN aa.asset_tag
++                                             WHEN tt.entity_type = 'inv_item' THEN ii.code END,
++                                        CONCAT(tt.entity_type, ' #', tt.entity_id)))
++                                ORDER BY tt.entity_type, tt.id SEPARATOR 0x1e)
++                       FROM inspection_template_targets tt
++                       LEFT JOIN assets    aa ON tt.entity_type = 'asset'    AND aa.id = tt.entity_id
++                       LEFT JOIN inv_items ii ON tt.entity_type = 'inv_item' AND ii.id = tt.entity_id
++                      WHERE tt.template_id = t.id) AS target_list
+                FROM inspection_templates t
+                LEFT JOIN users u ON u.id = t.created_by",
+         'columns' => [
+@@ -2887,7 +3131,7 @@ if ($action === 'templates') {
+                  ],
+              ]],
+             ['key'=>'item_count',      'label'=>'Items',      'sortable'=>false, 'th_class'=>'r','td_class'=>'r'],
+-            ['key'=>'target_count',    'label'=>'Linked to',  'sortable'=>false, 'th_class'=>'r','td_class'=>'r'],
++            ['key'=>'target_count',    'label'=>'Linked to',  'sortable'=>false],
+             ['key'=>'use_count',       'label'=>'Used by',    'sortable'=>false, 'th_class'=>'r','td_class'=>'r'],
+             ['key'=>'creator_name',    'label'=>'Created by','sortable'=>true,  'sql_col'=>'u.full_name'],
+             ['key'=>'is_active',       'label'=>'Status',     'sortable'=>true,  'sql_col'=>'t.is_active',
+@@ -2928,6 +3172,10 @@ if ($action === 'templates') {
+         // Export CSV — view permission is enough; no destructive side effect.
+         $actions .= '<a class="btn btn-icon" href="' . h(url('/inspection.php?action=template_export&id=' . (int)$r['id'])) . '"'
+                   . ' title="Download as CSV" aria-label="Export CSV">⤓ <span class="dt-action-label">Export CSV</span></a> ';
++        // Export bubble data — same format as the editor's "⊕ Import bubble
++        // data (CSV)" button, so the file can be re-imported into a template.
++        $actions .= '<a class="btn btn-icon" href="' . h(url('/inspection.php?action=template_export_bubbles&id=' . (int)$r['id'])) . '"'
++                  . ' title="Export bubble data CSV (re-importable via the editor\'s Import bubble data)" aria-label="Export bubble data">◎ <span class="dt-action-label">Export bubbles</span></a> ';
+         if ($canManage) {
+             $actions .= '<form method="post" style="display:inline" action="' . h(url('/inspection.php?action=template_save')) . '"'
+                       . ' onsubmit="return confirm(\'Delete template &quot;' . h(addslashes($r['name'])) . '&quot;? '
+@@ -2942,9 +3190,27 @@ if ($action === 'templates') {
+             'name'            => '<strong>' . h($r['name']) . '</strong>',
+             'inspection_type' => '<span class="pill pill-neutral">' . h(inspection_type_label($r['inspection_type'])) . '</span>',
+             'item_count'      => (int)$r['item_count'],
+-            'target_count'    => (int)$r['target_count']
+-                                  ? (int)$r['target_count']
+-                                  : '<span class="muted small">any</span>',
++            // "Linked to" — comma-separated inventory codes / asset tags,
++            // each linking to its item (or asset) view page. Falls back to
++            // "any" when the template isn't pinned to specific targets.
++            'target_count'    => (function () use ($r) {
++                $list = (string)($r['target_list'] ?? '');
++                if ($list === '') return '<span class="muted small">any</span>';
++                $links = [];
++                foreach (explode("\x1e", $list) as $rec) {
++                    list($etype, $eid, $code) = array_pad(explode("\x1f", $rec, 3), 3, '');
++                    $href = '';
++                    if ($etype === 'inv_item') {
++                        $href = url('/inventory.php?action=item_view&id=' . (int)$eid);
++                    } elseif ($etype === 'asset') {
++                        $href = url('/asset.php?action=view&id=' . (int)$eid);
++                    }
++                    $links[] = $href !== ''
++                        ? '<a href="' . h($href) . '"><code>' . h($code) . '</code></a>'
++                        : '<code>' . h($code) . '</code>';
++                }
++                return implode(', ', $links);
++            })(),
+             'use_count'       => (int)$r['use_count'],
+             'creator_name'    => h($r['creator_name'] ?: '—'),
+             'is_active'       => $status,
+@@ -5491,6 +5757,32 @@ if ($action === 'execute') {
+     }
+     $execCurrentSamples = max(1, (int)($row['sample_count'] ?? 1));
+ 
++    // ---- Template picker for the Start-Inspection modal -------------
++    // List every active template linked to the inspected item (or asset),
++    // newest first, so the inspector can switch templates at start time.
++    // The most recently created template is pre-selected (the common case
++    // after revising/adding a template for the part).
++    $execTemplates     = [];
++    $execSelTemplateId = (int)($row['template_id'] ?? 0);
++    $execTgt = ir_template_target_entity($row);
++    if ($execTgt['type'] && $execTgt['id']) {
++        $execTemplates = db_all(
++            "SELECT t.id, t.code, t.name, t.created_at,
++                    (SELECT COUNT(*) FROM inspection_template_items i WHERE i.template_id = t.id) AS item_count
++               FROM inspection_template_targets tt
++               JOIN inspection_templates t ON t.id = tt.template_id AND t.is_active = 1
++              WHERE tt.entity_type = ? AND tt.entity_id = ?
++              ORDER BY t.created_at DESC, t.id DESC",
++            [$execTgt['type'], $execTgt['id']]
++        );
++    }
++    // Pre-select the latest created template (top of the list). Falls back
++    // to the inspection's current template_id when the item has no linked
++    // templates to choose from.
++    if ($execTemplates) {
++        $execSelTemplateId = (int)$execTemplates[0]['id'];
++    }
++
+     $page_title  = 'Execute ' . $row['code'];
+     $page_module = 'inspection';
+     $focus_id    = '';
+@@ -5828,12 +6120,38 @@ if ($action === 'execute') {
+                 <?= csrf_field() ?>
+                 <input type="hidden" name="op" value="execute_start">
+                 <input type="hidden" name="id" value="<?= $id ?>">
+-                <div class="form-grid">
++                <div class="form-grid-2">
++                    <?php if (count($execTemplates) > 0): ?>
+                     <div class="field span-2">
++                        <label for="esm_template">Inspection template *</label>
++                        <select id="esm_template" name="template_id" required class="no-combobox">
++                            <?php foreach ($execTemplates as $t): ?>
++                                <option value="<?= (int)$t['id'] ?>"
++                                        <?= (int)$t['id'] === $execSelTemplateId ? 'selected' : '' ?>>
++                                    <?= h($t['code'] . ' — ' . $t['name']) ?>
++                                    (<?= (int)$t['item_count'] ?> bubble<?= (int)$t['item_count'] === 1 ? '' : 's' ?>)
++                                </option>
++                            <?php endforeach; ?>
++                        </select>
++                    </div>
++                    <?php endif; ?>
++                    <div class="field">
+                         <label for="esm_date">Date of inspection *</label>
+                         <input id="esm_date" name="inspection_date" type="date" required
+                                value="<?= h(date('Y-m-d')) ?>">
+                     </div>
++                    <div class="field">
++                        <label for="esm_samples">
++                            Samples taken *
++                            <?php if ($execMaxSamples !== null): ?>
++                                <span class="muted small">(max <?= (int)$execMaxSamples ?> — txn qty)</span>
++                            <?php endif; ?>
++                        </label>
++                        <input id="esm_samples" name="samples_taken" type="number" required
++                               min="1"
++                               <?= $execMaxSamples !== null ? 'max="' . (int)$execMaxSamples . '"' : '' ?>
++                               value="<?= (int)$execCurrentSamples ?>">
++                    </div>
+                     <div class="field span-2">
+                         <label for="esm_inspector">Inspected by *</label>
+                         <select id="esm_inspector" name="inspector_id" required class="no-combobox">
+@@ -5846,18 +6164,6 @@ if ($action === 'execute') {
+                             <?php endforeach; ?>
+                         </select>
+                     </div>
+-                    <div class="field span-4">
+-                        <label for="esm_samples">
+-                            Samples taken *
+-                            <?php if ($execMaxSamples !== null): ?>
+-                                <span class="muted small">(max <?= (int)$execMaxSamples ?> — txn qty)</span>
+-                            <?php endif; ?>
+-                        </label>
+-                        <input id="esm_samples" name="samples_taken" type="number" required
+-                               min="1"
+-                               <?= $execMaxSamples !== null ? 'max="' . (int)$execMaxSamples . '"' : '' ?>
+-                               value="<?= (int)$execCurrentSamples ?>">
+-                    </div>
+                 </div>
+                 <div style="margin-top: 20px; display:flex; gap:8px; justify-content:flex-end;">
+                     <a class="btn btn-ghost"
+@@ -5925,6 +6231,10 @@ $dtCfg = [
+                          ii.long_description,
+                          i.part_description) AS part_name,
+                 COALESCE(et_i.code, ii.code, i.part_no, i.pid) AS part_code,
++                -- Item Part number + Rev no, same cascading fallback as part_name:
++                --   txn-linked item → direct inv_item → snapshot on the inspection.
++                COALESCE(NULLIF(et_i.part_no, ''), NULLIF(ii.part_no, ''), NULLIF(i.part_no, '')) AS item_part_no,
++                COALESCE(NULLIF(et_i.part_rev_no, ''), NULLIF(ii.part_rev_no, ''), NULLIF(i.part_rev, '')) AS item_part_rev,
+                 -- 'From' source label, used for sort + filter (display
+                 -- adds the receipt_no prefix in the row renderer).
+                 CASE
+@@ -5978,6 +6288,14 @@ $dtCfg = [
+                                         ii.long_description,
+                                         i.part_description, ''),
+                                ' ', COALESCE(jc.po_no, ''))"],
++        ['key'=>'item_part_rev',  'label'=>'Part number-Rev.no', 'sortable'=>true, 'searchable'=>true,
++            // Combined "PARTNO-REV" (rev suffix only when present), with the
++            // same et_i → ii → snapshot fallback used by part_name above.
++            'sql_col'=>"CONCAT(
++                COALESCE(NULLIF(et_i.part_no, ''), NULLIF(ii.part_no, ''), NULLIF(i.part_no, ''), ''),
++                CASE WHEN COALESCE(NULLIF(et_i.part_rev_no, ''), NULLIF(ii.part_rev_no, ''), NULLIF(i.part_rev, '')) <> ''
++                     THEN CONCAT('-', COALESCE(NULLIF(et_i.part_rev_no, ''), NULLIF(ii.part_rev_no, ''), NULLIF(i.part_rev, '')))
++                     ELSE '' END)"],
+         ['key'=>'txn_at',         'label'=>'Date',          'sortable'=>true, 'sql_col'=>'et.created_at',
+             'td_class'=>'nowrap'],
+         ['key'=>'txn_qty',        'label'=>'Qty',           'sortable'=>true, 'sql_col'=>'et.qty_delta',
+@@ -6085,12 +6403,23 @@ $rowRenderer = function ($r) use ($canCreate) {
+         $fromCell = h($r['from_label'] ?: '—');
+     }
+ 
++    // Part number-Rev.no cell — "PARTNO-REV", with the rev shown only
++    // when present. Both pieces blank → muted dash.
++    $partNoBits = array_filter([
++        trim((string)($r['item_part_no']  ?? '')),
++        trim((string)($r['item_part_rev'] ?? '')),
++    ], 'strlen');
++    $partRevCell = $partNoBits
++        ? h(implode('-', $partNoBits))
++        : '<span class="muted small">—</span>';
++
+     return [
+         'ir_no'             => $irCell,
+         'inspection_type'   => '<span class="pill pill-neutral">' . h(inspection_type_label($r['inspection_type'])) . '</span>',
+         'txn_id'            => $txnCell,
+         'from_label'        => $fromCell,
+         'part_name'         => $partCell,
++        'item_part_rev'     => $partRevCell,
+         'txn_at'            => $dateCell,
+         'txn_qty'           => $qtyCell,
+         'template_name'     => $r['template_name']
+diff --git a/logout.php b/logout.php
+index 10ab55c..8789122 100644
+--- a/logout.php
++++ b/logout.php
+@@ -4,5 +4,7 @@
+  * Created: 20260515_060024_IST
+  */
+ require_once __DIR__ . '/includes/bootstrap.php';
++// Capture the central SSO logout URL before the local session is cleared.
++$ssoLogoutUrl = sso_logout_url();
+ auth_sign_out();
+-redirect(url('/login.php'));
++redirect($ssoLogoutUrl ?: url('/login.php'));
+diff --git a/services/OldInventoryInspectionTemplateImportService.php b/services/OldInventoryInspectionTemplateImportService.php
+index 3fb7090..80cf257 100644
+--- a/services/OldInventoryInspectionTemplateImportService.php
++++ b/services/OldInventoryInspectionTemplateImportService.php
+@@ -188,6 +188,61 @@ class OldInventoryInspectionTemplateImportService
+         return $this->counts;
+     }
+ 
++    // ── Fetch just ONE product's rows (for a single-template restore) ─────────
++    /**
++     * Fetch every legacy `inspection` row for a single pid, used by the
++     * "Restore one template's bubbles" button. Passes the pid to the API as
++     * an optimization; older deployed endpoints ignore unknown params and
++     * return the full paginated set, so we ALSO filter client-side. Because
++     * inspections_json orders by CAST(pid AS UNSIGNED) ASC, once the scan
++     * passes a numeric target pid we can stop early instead of walking the
++     * whole table.
++     *
++     * Returns the matching rows in source order (possibly empty).
++     */
++    public function fetchRowsForPid(string $pid): array
++    {
++        $target    = trim($pid);
++        $targetNum = ctype_digit($target) ? (int)$target : null;
++        $collected = [];
++        $offset    = 0;
++
++        while (true) {
++            $data  = old_inventory_inspections_api('inspections_json', [
++                'offset' => $offset,
++                'limit'  => self::BATCH_SIZE,
++                'pid'    => $target,   // honored by updated endpoints; ignored by old ones
++            ]);
++            $batch = $data['rows'] ?? [];
++            if (empty($batch)) {
++                break;
++            }
++
++            $sawBeyond = false;
++            foreach ($batch as $r) {
++                $rp = trim((string)($r['pid'] ?? ''));
++                if ($rp === $target) {
++                    $collected[] = $r;
++                }
++                if ($targetNum !== null && ctype_digit($rp) && (int)$rp > $targetNum) {
++                    $sawBeyond = true;
++                }
++            }
++
++            // Last page reached, or (server didn't filter) we've scanned past
++            // the target pid in the ascending ordering — nothing more to find.
++            if (count($batch) < self::BATCH_SIZE) {
++                break;
++            }
++            if ($sawBeyond) {
++                break;
++            }
++            $offset += self::BATCH_SIZE;
++        }
++
++        return $collected;
++    }
++
+     // ── Import one product's rows as a single template ───────────────────────
+     // Public so the chunked AJAX driver in inspection.php can feed it one
+     // complete pid group at a time (the full-table run() loops over it too).

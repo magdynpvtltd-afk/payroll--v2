@@ -1,0 +1,3506 @@
+diff --git a/account.php b/account.php
+new file mode 100644
+index 0000000..88dfb3c
+--- /dev/null
++++ b/account.php
+@@ -0,0 +1,141 @@
++<?php
++/**
++ * MagDyn — My account (self-service)
++ * Created: 20260616_IST
++ *
++ * Lets the signed-in user change their own password. Always acts on the
++ * REAL signed-in account (never the impersonated one), requires the current
++ * password to be confirmed, and enforces a strong-password policy via
++ * password_strength_errors().
++ *
++ * Actions:
++ *   ?action=password        (default) change-password form
++ *   ?action=change_password (POST)    process the change
++ */
++require_once __DIR__ . '/includes/bootstrap.php';
++require_login();
++
++// Self-service always targets the real signed-in user, even mid-impersonation.
++$me = real_user();
++if (!$me) {
++    flash_set('error', 'Account not found.');
++    redirect(url('/index.php'));
++}
++
++$action = (string)input('action', 'password');
++
++if ($action === 'change_password') {
++    csrf_check();
++
++    $current = (string)input('current_password');
++    $new     = (string)input('new_password');
++    $confirm = (string)input('confirm_password');
++
++    $errors = [];
++
++    $hasLocalPassword = !empty($me['password_hash']);
++    $pepper = $GLOBALS['APP']['password_pepper'];
++
++    // Verify the current password for accounts that have one. SSO-only
++    // accounts (no local hash) are allowed to set an initial password.
++    if ($hasLocalPassword) {
++        if ($current === '') {
++            $errors[] = 'Enter your current password.';
++        } elseif (!password_verify($current . $pepper, $me['password_hash'])) {
++            $errors[] = 'Your current password is incorrect.';
++        }
++    }
++
++    if ($new === '') {
++        $errors[] = 'Enter a new password.';
++    }
++    if ($new !== $confirm) {
++        $errors[] = 'New password and confirmation do not match.';
++    }
++    if ($hasLocalPassword && $new !== '' && $new === $current) {
++        $errors[] = 'New password must be different from your current password.';
++    }
++
++    // Strong-password policy.
++    foreach (password_strength_errors($new, ['username' => $me['username'], 'email' => $me['email']]) as $e) {
++        $errors[] = $e;
++    }
++
++    if ($errors) {
++        foreach ($errors as $e) flash_set('error', $e);
++        redirect(url('/account.php?action=password'));
++    }
++
++    $hash = password_hash($new . $pepper, PASSWORD_DEFAULT);
++    db_exec('UPDATE users SET password_hash = ? WHERE id = ?', [$hash, (int)$me['id']]);
++    try {
++        db_exec(
++            "INSERT INTO audit_log (actor_id, target_id, action, details, ip)
++             VALUES (?, ?, 'user.password_change', 'changed own password', ?)",
++            [(int)$me['id'], (int)$me['id'], $_SERVER['REMOTE_ADDR'] ?? null]
++        );
++    } catch (\Throwable $e) { /* audit best-effort */ }
++
++    flash_set('success', 'Your password has been changed.');
++    redirect(url('/account.php?action=password'));
++}
++
++// ============================================================
++// RENDER — change-password form
++// ============================================================
++$hasLocalPassword = !empty($me['password_hash']);
++
++$page_title  = 'My account';
++$page_module = '';
++$focus_id    = $hasLocalPassword ? 'f_current' : 'f_new';
++require __DIR__ . '/includes/header.php';
++?>
++<div class="form-page">
++    <?= form_toolbar([
++        'title'    => 'Change password',
++        'subtitle' => $me['full_name'] . ' · ' . $me['email'],
++        'back_href'  => url('/index.php'),
++        'back_label' => 'Home',
++        'actions_html' =>
++            '<button type="submit" form="main-form" class="btn btn-primary btn-sm"'
++          . ' data-shortcut="S">' . shortcut_label('Save', 'S') . '</button>'
++          . ' <a class="btn btn-ghost btn-sm" href="' . h(url('/index.php')) . '"'
++          . ' data-shortcut="C" accesskey="c">' . shortcut_label('Cancel', 'C') . '</a>',
++    ]) ?>
++    <form id="main-form" class="form-page-body" method="post"
++          action="<?= h(url('/account.php?action=change_password')) ?>" autocomplete="off" novalidate>
++        <?= csrf_field() ?>
++        <div class="form-grid">
++            <?php if ($hasLocalPassword): ?>
++                <div class="field span-2">
++                    <label for="f_current">Current password *</label>
++                    <input id="f_current" name="current_password" type="password" tabindex="1"
++                           autocomplete="current-password" required>
++                </div>
++            <?php else: ?>
++                <div class="field span-2">
++                    <p class="muted small">
++                        Your account signs in via SSO and has no password yet.
++                        Set one below to also enable local sign-in.
++                    </p>
++                </div>
++            <?php endif; ?>
++
++            <div class="field span-2">
++                <label for="f_new">New password *</label>
++                <input id="f_new" name="new_password" type="password" tabindex="2"
++                       autocomplete="new-password" required>
++                <span class="muted small">
++                    At least 10 characters with an uppercase letter, a lowercase letter,
++                    a number, and a symbol. Must not contain your username or email.
++                </span>
++            </div>
++            <div class="field span-2">
++                <label for="f_confirm">Confirm new password *</label>
++                <input id="f_confirm" name="confirm_password" type="password" tabindex="3"
++                       autocomplete="new-password" required>
++            </div>
++        </div>
++    </form>
++</div>
++<?php require __DIR__ . '/includes/footer.php'; ?>
+diff --git a/api_export_notes.php b/api_export_notes.php
+index 24d7c25..1f806ba 100644
+--- a/api_export_notes.php
++++ b/api_export_notes.php
+@@ -26,12 +26,26 @@
+  *           attachments: [ {attachment_id, filename, type, tmp_name}, ... ]
+  *       }, ... ], "count": N}
+  *
++ *   ?action=attachments_count
++ *       Returns: {"count": 2960}   (non-redacted attachments with a tmp_name)
++ *
++ *   ?action=attachment_file&tmp=<tmp_name>   (or &id=<attachment_id>)
++ *       Streams the physical attachment file (binary), located on disk by its
++ *       ORIGINAL filename under uploads/. On error returns JSON
++ *       {"error": "..."} with a 4xx/5xx status, so the caller can tell a
++ *       genuine "missing on disk" (404) apart from the success (200) case.
++ *
+  * PHP 5.6 compatible — no null coalescing, no return types, no scalar hints.
+  */
+ 
+ // ── Shared secret ────────────────────────────────────────────────────────────
+ define('API_TOKEN', 'MAGDYN_IMPORT_SECRET');   // ← must match config/old_inventory_api.php
+ 
++// Directory the physical attachment files live in on the old server. The old
++// uploader (uploads/ajax.php) saved each file under its ORIGINAL basename in
++// this folder — NOT under the SHA-256 tmp_name recorded in the DB.
++define('UPLOAD_DIR', __DIR__ . '/uploads');
++
+ // ── Auth check ───────────────────────────────────────────────────────────────
+ header('Content-Type: application/json; charset=utf-8');
+ 
+@@ -87,6 +101,95 @@ if ($action === 'notes_count') {
+     exit;
+ }
+ 
++// ── attachments_count — non-redacted attachments that have a tmp_name ──────────
++if ($action === 'attachments_count') {
++    try {
++        $n = (int)$pdo->query(
++            "SELECT COUNT(*) FROM notes_attachments
++              WHERE redact = 0 AND tmp_name IS NOT NULL AND tmp_name != ''"
++        )->fetchColumn();
++        echo json_encode(array('count' => $n));
++    } catch (Exception $e) {
++        echo json_encode(array('error' => 'Count query failed: ' . $e->getMessage()));
++    }
++    exit;
++}
++
++// ── attachment_file — stream one physical attachment (binary) ──────────────────
++if ($action === 'attachment_file') {
++    $tmp = isset($_GET['tmp']) ? trim($_GET['tmp']) : '';
++    $aid = isset($_GET['id'])  ? (int)$_GET['id']    : 0;
++
++    if ($tmp === '' && $aid <= 0) {
++        http_response_code(400);
++        echo json_encode(array('error' => 'Missing tmp or id parameter'));
++        exit;
++    }
++
++    // Look up the original filename for this attachment.
++    try {
++        if ($aid > 0) {
++            $st = $pdo->prepare('SELECT filename, type FROM notes_attachments WHERE attachment_id = ? AND redact = 0 LIMIT 1');
++            $st->execute(array($aid));
++        } else {
++            $st = $pdo->prepare('SELECT filename, type FROM notes_attachments WHERE tmp_name = ? AND redact = 0 LIMIT 1');
++            $st->execute(array($tmp));
++        }
++        $row = $st->fetch();
++    } catch (Exception $e) {
++        http_response_code(500);
++        echo json_encode(array('error' => 'Query failed: ' . $e->getMessage()));
++        exit;
++    }
++
++    if (!$row) {
++        http_response_code(404);
++        echo json_encode(array('error' => 'Attachment row not found (redacted or unknown).'));
++        exit;
++    }
++
++    // Resolve the physical file. Try the original basename and a couple of
++    // decoded variants (the legacy uploader ran htmlspecialchars on names),
++    // under uploads/ and uploads/attachments/.
++    $raw  = trim((string)$row['filename']);
++    $cands = array();
++    $cands[basename($raw)] = true;
++    $cands[basename(html_entity_decode($raw, ENT_QUOTES))] = true;
++
++    $path = null;
++    foreach (array_keys($cands) as $base) {
++        if ($base === '') { continue; }
++        foreach (array(UPLOAD_DIR . '/' . $base, UPLOAD_DIR . '/attachments/' . $base) as $c) {
++            if (is_file($c)) { $path = $c; break 2; }
++        }
++    }
++
++    if ($path === null) {
++        http_response_code(404);
++        echo json_encode(array('error' => 'File missing on disk: ' . basename($raw)));
++        exit;
++    }
++
++    // Path-traversal guard: the resolved file must live inside UPLOAD_DIR.
++    $realBase = realpath(UPLOAD_DIR);
++    $realFile = realpath($path);
++    if ($realFile === false || $realBase === false || strpos($realFile, $realBase) !== 0) {
++        http_response_code(403);
++        echo json_encode(array('error' => 'Resolved path is outside the uploads directory.'));
++        exit;
++    }
++
++    // Stream it. Replace the JSON content-type header set at the top.
++    $mime = ($row['type'] !== '' && $row['type'] !== null) ? $row['type'] : 'application/octet-stream';
++    header('Content-Type: ' . $mime);
++    header('Content-Length: ' . filesize($realFile));
++    header('Content-Disposition: attachment; filename="' . basename($realFile) . '"');
++    // Clear any buffered output (the header() calls above are fine; nothing was echoed).
++    while (ob_get_level() > 0) { ob_end_clean(); }
++    readfile($realFile);
++    exit;
++}
++
+ // ── all_notes_json — inv_notes (+ attachments) paginated ───────────────────────
+ if ($action === 'all_notes_json') {
+     try {
+diff --git a/asset.php b/asset.php
+index 8ad7961..40fc3e1 100644
+--- a/asset.php
++++ b/asset.php
+@@ -2956,8 +2956,11 @@ if ($action === 'list') {
+                       . ' title="Import assets from CSV">⤒ Import CSV</button> ';
+         $actionsHtml .= '<a class="btn btn-primary btn-sm" href="' . h(url('/asset.php?action=new')) . '"'
+                       . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New asset', 'N') . '</a>';
+-        $actionsHtml .= ' <a class="btn btn-ghost btn-sm" href="' . h(url('/old_inventory_import.php')) . '"'
+-                      . ' title="Import assets from old inventory_live database">⤒ Import Old Inventory</a>';
++        // Old-inventory import is admin-only and lives under Admin ▸ Old Inventory Import.
++        if (is_admin()) {
++            $actionsHtml .= ' <a class="btn btn-ghost btn-sm" href="' . h(url('/old_inventory_import.php')) . '"'
++                          . ' title="Import assets from old inventory_live database">⤒ Import Old Inventory</a>';
++        }
+     }
+     if ($canTransact) {
+         // Append after the create-side buttons so the order reads
+diff --git a/assets/css/app.css b/assets/css/app.css
+index 6ec4fa8..aaf09f2 100644
+--- a/assets/css/app.css
++++ b/assets/css/app.css
+@@ -161,6 +161,103 @@ body[data-chord-first] [data-shortcut].chord-match {
+ }
+ .perm-matrix input[type="checkbox"] { transform: scale(1.1); }
+ 
++/* ---- Permission module cards ----
++   Each module renders as its own self-contained card in a responsive
++   grid, so the permissions screen reads as discrete sections instead
++   of one long table. */
++/* Masonry-style columns: card heights vary widely (Admin has ~17
++   sub-modules, Assets only 3) so a flex/grid row would leave big gaps.
++   Columns let each card pack against the previous one. */
++.perm-modules {
++    column-width: 340px;
++    column-gap: 14px;
++    margin-top: 14px;
++}
++.perm-module {
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    background: var(--surface);
++    overflow: hidden;
++    break-inside: avoid;
++    -webkit-column-break-inside: avoid;
++    margin-bottom: 14px;
++    display: inline-block;
++    width: 100%;
++}
++
++/* A sub-module block inside a group card (e.g. "View Assets" under Assets) */
++.perm-subgroup {
++    margin-top: 6px;
++    padding-top: 6px;
++    border-top: 1px dashed var(--border);
++}
++.perm-subgroup-head {
++    display: flex;
++    align-items: center;
++    gap: 7px;
++    font-size: 11.5px;
++    font-weight: 600;
++    color: var(--text-muted);
++    text-transform: uppercase;
++    letter-spacing: 0.03em;
++    cursor: pointer;
++    padding: 2px 4px;
++    margin-bottom: 2px;
++}
++.perm-subgroup-head input[type="checkbox"] { transform: scale(1.05); flex: 0 0 auto; }
++.perm-module-head {
++    display: flex;
++    align-items: center;
++    gap: 8px;
++    padding: 9px 12px;
++    background: var(--surface-alt, #f8f9fb);
++    border-bottom: 1px solid var(--border);
++}
++.perm-module-head .perm-module-title {
++    display: flex;
++    align-items: center;
++    gap: 7px;
++    font-weight: 600;
++    font-size: 13px;
++    color: var(--text);
++    cursor: pointer;
++    margin: 0;
++    flex: 1 1 auto;
++    min-width: 0;
++}
++.perm-module-icon { font-size: 15px; line-height: 1; }
++.perm-module-count {
++    font-size: 11px;
++    font-weight: 600;
++    color: var(--text-muted);
++    background: var(--surface);
++    border: 1px solid var(--border);
++    border-radius: 10px;
++    padding: 1px 8px;
++    white-space: nowrap;
++}
++.perm-module-body {
++    display: flex;
++    flex-direction: column;
++    padding: 6px 12px 10px;
++}
++.perm-option {
++    display: flex;
++    align-items: flex-start;
++    gap: 8px;
++    padding: 5px 4px;
++    font-weight: normal;
++    font-size: 12.5px;
++    border-radius: 5px;
++    cursor: pointer;
++}
++.perm-option:hover { background: var(--surface-alt, #f3f4f7); }
++.perm-option input[type="checkbox"] { transform: scale(1.1); margin-top: 2px; flex: 0 0 auto; }
++.perm-option-text { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
++.perm-option-name { color: var(--text); }
++.perm-option-code { font-size: 11px; color: var(--text-muted); }
++.perm-module-head .perm-module-title input[type="checkbox"] { transform: scale(1.1); flex: 0 0 auto; }
++
+ /* ---- Asset module specifics ---- */
+ .cal-warn-row    { background: var(--warn-bg); }
+ .cal-overdue-row { background: var(--danger-bg); }
+diff --git a/assets/css/magdyn-base.css b/assets/css/magdyn-base.css
+index 750c397..26df2aa 100644
+--- a/assets/css/magdyn-base.css
++++ b/assets/css/magdyn-base.css
+@@ -288,10 +288,23 @@ code {
+ }
+ .logout:hover { background: var(--sidebar-bg-hover); color: white; text-decoration: none; }
+ 
++.account-link {
++    display: flex; align-items: center; gap: 8px;
++    padding: 8px 10px;
++    margin-bottom: 4px;
++    color: var(--sidebar-text-dim);
++    font-size: 12.5px;
++    text-decoration: none;
++    border-radius: 5px;
++    transition: background 0.12s;
++}
++.account-link:hover { background: var(--sidebar-bg-hover); color: white; text-decoration: none; }
++
+ .sidebar.collapsed .sidebar-footer { padding: 10px 8px; }
+ .sidebar.collapsed .user-meta { display: none; }
+ .sidebar.collapsed .user-card { justify-content: center; margin-bottom: 8px; }
+ .sidebar.collapsed .logout { justify-content: center; padding: 8px; }
++.sidebar.collapsed .account-link { justify-content: center; padding: 8px; }
+ 
+ /* ============================================================
+    Page header — H1 + actions on right
+diff --git a/bom_old_import.php b/bom_old_import.php
+index ba96b7b..250fde7 100644
+--- a/bom_old_import.php
++++ b/bom_old_import.php
+@@ -896,12 +896,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import
+ 
+ // ── AJAX POST: action=import_stock_from_tree ─────────────────────────────────
+ //   Final step of "Import Transactions & Shipments". Fetches the per-item
+-//   stock_locations from tree7-5.php and writes the on-hand (available)
+-//   quantities into MagDyn, mapping ONLY these two old-system locations:
++//   stock_locations from tree7-5.php and writes the on-hand quantities
++//   into MagDyn, mapping these four old-system locations:
+ //
+ //       old "Magdyn"            → MagDyn location  Magdyn   (available qty)
+-//       old "Rejection_Return"  → MagDyn location  LOC-REJ
++//       old "Rejection_Return"  → MagDyn location  LOC-REJ  (quarantine)
++//       old "Lost In Process"   → MagDyn location  LOC-LIP  ┐ held: tracked but
++//       old "Sample"            → MagDyn location  LOC-SMP  ┘ NOT available /
++//                                                            process / shippable
+ //
++//   The two held locations (LOC-LIP / LOC-SMP) are auto-created if absent.
+ //   All other old-system stock locations are ignored. Quantities are set
+ //   absolutely (the old system's current balance), straight into
+ //   inv_item_location_stock — no inv_txns rows are written, so the audit
+@@ -916,9 +920,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import
+     @set_time_limit(300);
+ 
+     // old-system stock location (normalised) → MagDyn locations.code
++    //
++    //   Magdyn           → Magdyn   (available stock)
++    //   Rejection_Return → LOC-REJ  (quarantine; excluded from Avb)
++    //   Lost In Process  → LOC-LIP  ┐ "held" buckets — tracked on-hand but
++    //   Sample           → LOC-SMP  ┘ never Available / process / shippable
++    //                                 (see inv_held_location_codes()).
+     $locMap = [
+         'magdyn'           => 'Magdyn',
+         'rejection_return' => 'LOC-REJ',
++        'lost_in_process'  => 'LOC-LIP',
++        'sample'           => 'LOC-SMP',
++    ];
++
++    // Held locations are auto-created (code → name) on first import so
++    // their quantities always have somewhere to land instead of being
++    // silently counted as skipped_no_loc.
++    $autoCreateLoc = [
++        'LOC-LIP' => 'Lost In Process',
++        'LOC-SMP' => 'Sample',
+     ];
+ 
+     try {
+@@ -933,6 +953,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import
+         foreach (array_unique(array_values($locMap)) as $lc) {
+             $r = db_one('SELECT id FROM locations WHERE code = ? LIMIT 1', [$lc]);
+             if (!$r) $r = db_one('SELECT id FROM locations WHERE LOWER(name) = LOWER(?) LIMIT 1', [$lc]);
++            if (!$r && isset($autoCreateLoc[$lc])) {
++                // First import: stand up the held location so its qty lands
++                // somewhere. Active so it shows in the Locations register and
++                // in Move pickers (qty here can only be added or moved).
++                db_exec(
++                    'INSERT INTO locations (code, name, notes, sort_order, is_active)
++                          VALUES (?, ?, ?, 100, 1)',
++                    [$lc, $autoCreateLoc[$lc],
++                     'Held stock — not available for process or shipment. Imported from old system.']
++                );
++                $newId = (int)db_val('SELECT LAST_INSERT_ID()', [], 0);
++                if ($newId) $r = ['id' => $newId];
++            }
+             $locIds[$lc] = $r ? (int)$r['id'] : null;
+         }
+ 
+@@ -1739,9 +1772,12 @@ require __DIR__ . '/includes/header.php';
+             auto-generated PO number. Run <strong>Delete All Inventory Records</strong> before
+             re-importing — the import refuses to run if <code>inv_txns</code> / <code>inv_shipments</code>
+             already contain rows. As a final step it fetches stock from
+-            <code>tree7-5.php</code> and writes the available quantities into MagDyn —
++            <code>tree7-5.php</code> and writes the quantities into MagDyn —
+             old <strong>Magdyn</strong> → location <code>Magdyn</code> (available),
+-            old <strong>Rejection_Return</strong> → location <code>LOC-Rej</code>.
++            old <strong>Rejection_Return</strong> → location <code>LOC-Rej</code>,
++            old <strong>Lost In Process</strong> → <code>LOC-LIP</code> and
++            old <strong>Sample</strong> → <code>LOC-SMP</code> (held stock — tracked
++            on-hand but not available for process or shipment).
+         </p>
+ 
+         <!-- Progress widget (hidden until import starts) -->
+@@ -1779,7 +1815,7 @@ require __DIR__ . '/includes/header.php';
+                         'shipments' => 'Shipments',
+                         'receipts'  => 'Receipts',
+                         'po'        => 'Purchase Orders',
+-                        'stock'     => 'Stock (Magdyn → Available, Rejection_Return → LOC-Rej)',
++                        'stock'     => 'Stock (Magdyn → Available, Rejection_Return → LOC-Rej, Lost In Process → LOC-LIP, Sample → LOC-SMP)',
+                     ] as $key => $lbl): ?>
+                     <tr id="txn-row-<?= $key ?>">
+                         <td style="padding:7px 10px;border:1px solid #e5e7eb;"><?= h($lbl) ?></td>
+diff --git a/employees.php b/employees.php
+new file mode 100644
+index 0000000..a9f0ff3
+--- /dev/null
++++ b/employees.php
+@@ -0,0 +1,271 @@
++<?php
++/**
++ * MagDyn — Employees (shop-floor / staff directory)
++ * Created: 20260616_120000_IST
++ *
++ * Lightweight people list stored in `users_info` (id, name, status).
++ * status: 1 = active, 0 = inactive. Independent of login `users` — this is
++ * the source for the inventory "Process ▸ Done by" picker.
++ *
++ * Actions:
++ *   ?action=index           list (default)
++ *   ?action=view&id=N       read-only detail
++ *   ?action=new             new employee form
++ *   ?action=edit&id=N       edit existing
++ *   ?action=save  (POST)    create/update
++ *   ?action=toggle&id=N (POST)  activate/deactivate
++ *   ?action=delete (POST)   delete
++ */
++require_once __DIR__ . '/includes/bootstrap.php';
++require_login();
++require_permission('employees', 'view');
++
++$action = (string)input('action', 'index');
++
++// ============================================================
++// POST handlers
++// ============================================================
++
++if ($action === 'save') {
++    csrf_check();
++    $id     = (int)input('id', 0);
++    $name   = trim((string)input('name'));
++    $status = input('status') ? 1 : 0;
++
++    $errors = [];
++    if ($name === '')            $errors[] = 'Name is required.';
++    if (mb_strlen($name) > 45)   $errors[] = 'Name must be 45 characters or fewer.';
++
++    // Soft uniqueness: reject an exact (case-insensitive) duplicate name.
++    if ($name !== '') {
++        $clash = db_one(
++            'SELECT id FROM users_info WHERE name = ? AND id <> ? LIMIT 1',
++            [$name, $id]
++        );
++        if ($clash) $errors[] = 'Another employee with that name already exists.';
++    }
++
++    if (!$id) require_permission('employees', 'create');
++    else      require_permission('employees', 'manage');
++
++    if ($errors) {
++        foreach ($errors as $e) flash_set('error', $e);
++        $back = $id ? url('/employees.php?action=edit&id=' . $id) : url('/employees.php?action=new');
++        redirect($back);
++    }
++
++    if ($id) {
++        db_exec('UPDATE users_info SET name = ?, status = ? WHERE id = ?', [$name, $status, $id]);
++        flash_set('success', 'Employee updated.');
++    } else {
++        db_exec('INSERT INTO users_info (name, status) VALUES (?, ?)', [$name, $status]);
++        flash_set('success', 'Employee created.');
++    }
++    redirect(url('/employees.php'));
++}
++
++if ($action === 'toggle' && $_SERVER['REQUEST_METHOD'] === 'POST') {
++    require_permission('employees', 'manage');
++    csrf_check();
++    $id = (int)input('id', 0);
++    if ($id) {
++        db_exec('UPDATE users_info SET status = 1 - status WHERE id = ?', [$id]);
++        flash_set('success', 'Employee status toggled.');
++    }
++    redirect(url('/employees.php'));
++}
++
++if ($action === 'delete' && $_SERVER['REQUEST_METHOD'] === 'POST') {
++    require_permission('employees', 'delete');
++    csrf_check();
++    $id = (int)input('id', 0);
++    if (!$id) { flash_set('error', 'No employee specified.'); redirect(url('/employees.php')); }
++    $e = db_one('SELECT name FROM users_info WHERE id = ?', [$id]);
++    if (!$e) { flash_set('error', 'Employee not found.'); redirect(url('/employees.php')); }
++    db_exec('DELETE FROM users_info WHERE id = ?', [$id]);
++    flash_set('success', 'Employee deleted.');
++    redirect(url('/employees.php'));
++}
++
++// ============================================================
++// VIEW (read-only detail)
++// ============================================================
++if ($action === 'view') {
++    $id  = (int)input('id', 0);
++    $emp = db_one('SELECT * FROM users_info WHERE id = ?', [$id]);
++    if (!$emp) {
++        flash_set('error', 'Employee not found.');
++        redirect(url('/employees.php'));
++    }
++    $canManage = permission_check('employees', 'manage');
++
++    $page_title  = 'Employee · ' . $emp['name'];
++    $page_module = 'employees';
++    require __DIR__ . '/includes/header.php';
++    ?>
++    <div class="page-head">
++        <div>
++            <h1><?= h($emp['name']) ?></h1>
++            <p class="muted">Employee #<?= (int)$emp['id'] ?></p>
++        </div>
++        <div class="head-actions">
++            <a class="btn btn-ghost" href="<?= h(url('/employees.php')) ?>">← Employees</a>
++            <?php if ($canManage): ?>
++                <a class="btn btn-primary" href="<?= h(url('/employees.php?action=edit&id=' . (int)$emp['id'])) ?>">Edit</a>
++            <?php endif; ?>
++        </div>
++    </div>
++    <div class="card">
++        <div class="card-body">
++            <table class="data-table">
++                <tbody>
++                    <tr><th style="width:160px;">Name</th><td><?= h($emp['name']) ?></td></tr>
++                    <tr><th>Status</th><td>
++                        <?= $emp['status']
++                            ? '<span class="pill pill-active">active</span>'
++                            : '<span class="pill pill-neutral">inactive</span>' ?>
++                    </td></tr>
++                </tbody>
++            </table>
++        </div>
++    </div>
++    <?php
++    require __DIR__ . '/includes/footer.php';
++    exit;
++}
++
++// ============================================================
++// NEW / EDIT form
++// ============================================================
++if ($action === 'new' || $action === 'edit') {
++    $editing = null;
++    if ($action === 'edit') {
++        require_permission('employees', 'manage');
++        $id = (int)input('id', 0);
++        $editing = db_one('SELECT * FROM users_info WHERE id = ?', [$id]);
++        if (!$editing) {
++            flash_set('error', 'Employee not found.');
++            redirect(url('/employees.php'));
++        }
++    } else {
++        require_permission('employees', 'create');
++    }
++
++    $page_title  = $editing ? 'Edit employee' : 'New employee';
++    $page_module = 'employees';
++    $focus_id    = 'f_name';
++    require __DIR__ . '/includes/header.php';
++    ?>
++    <div class="form-page">
++        <?= form_toolbar([
++            'title'       => $editing ? 'Edit employee' : 'New employee',
++            'subtitle'    => $editing ? $editing['name'] : 'Add a person to the directory',
++            'back_href'   => url('/employees.php'),
++            'back_label'  => 'Employees',
++            'actions_html' =>
++                '<button type="submit" form="main-form" class="btn btn-primary btn-sm"'
++              . ' data-shortcut="S">' . shortcut_label('Save', 'S') . '</button>'
++              . ' <a class="btn btn-ghost btn-sm" href="' . h(url('/employees.php')) . '"'
++              . ' data-shortcut="C" accesskey="c">' . shortcut_label('Cancel', 'C') . '</a>',
++        ]) ?>
++        <form id="main-form" class="form-page-body" method="post"
++              action="<?= h(url('/employees.php?action=save')) ?>" novalidate>
++            <?= csrf_field() ?>
++            <input type="hidden" name="id" value="<?= $editing ? (int)$editing['id'] : '' ?>">
++            <div class="form-grid">
++                <div class="field span-2">
++                    <label for="f_name"><?= shortcut_label('Name', 'N') ?> *</label>
++                    <input id="f_name" name="name" type="text" tabindex="1" required maxlength="45"
++                           value="<?= h($editing['name'] ?? '') ?>">
++                </div>
++                <div class="field">
++                    <label class="nowrap" style="font-weight: normal;">
++                        <input type="checkbox" name="status" value="1" tabindex="2"
++                               <?= (!$editing || $editing['status']) ? 'checked' : '' ?>>
++                        <?= shortcut_label('Active', 'A') ?>
++                    </label>
++                </div>
++            </div>
++        </form>
++    </div>
++    <?php
++    require __DIR__ . '/includes/footer.php';
++    exit;
++}
++
++// ============================================================
++// LIST
++// ============================================================
++require_once __DIR__ . '/includes/datatable.php';
++
++$canCreate = permission_check('employees', 'create');
++$canManage = permission_check('employees', 'manage');
++$canDelete = permission_check('employees', 'delete');
++
++$dtCfg = [
++    'id'       => 'employees',
++    'base_sql' => 'SELECT e.* FROM users_info e',
++    'columns'  => [
++        ['key'=>'name',     'label'=>'Name',    'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.name'],
++        ['key'=>'status',   'label'=>'Status',  'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.status'],
++        ['key'=>'_actions', 'label'=>'Actions', 'sortable'=>false,'searchable'=>false, 'th_class'=>'r', 'td_class'=>'r nowrap'],
++    ],
++    'default_sort' => ['name', 'asc'],
++];
++
++$rowRenderer = function ($e) use ($canManage, $canDelete) {
++    $name = $canManage
++          ? '<strong><a href="' . h(url('/employees.php?action=edit&id=' . (int)$e['id'])) . '">' . h($e['name']) . '</a></strong>'
++          : '<strong><a href="' . h(url('/employees.php?action=view&id=' . (int)$e['id'])) . '">' . h($e['name']) . '</a></strong>';
++
++    $status = $e['status']
++        ? '<span class="pill pill-active">active</span>'
++        : '<span class="pill pill-neutral">inactive</span>';
++
++    $actions = '<a class="btn btn-icon" title="View" aria-label="View" href="'
++             . h(url('/employees.php?action=view&id=' . (int)$e['id'])) . '">👁 <span class="dt-action-label">View</span></a> ';
++    if ($canManage) {
++        $actions .= '<a class="btn btn-icon" title="Edit employee" aria-label="Edit employee" href="'
++                  . h(url('/employees.php?action=edit&id=' . (int)$e['id'])) . '">✎ <span class="dt-action-label">Edit</span></a> ';
++        $toggleTitle = $e['status'] ? 'Deactivate' : 'Activate';
++        $toggleGlyph = $e['status'] ? '🚫' : '✅';
++        $actions .= '<form method="post" style="display:inline" action="' . h(url('/employees.php?action=toggle')) . '">'
++                  . csrf_field()
++                  . '<input type="hidden" name="id" value="' . (int)$e['id'] . '">'
++                  . '<button class="btn btn-icon" type="submit" title="' . h($toggleTitle) . '" aria-label="' . h($toggleTitle) . '">'
++                  . $toggleGlyph . ' <span class="dt-action-label">' . h($toggleTitle) . '</span></button></form> ';
++    }
++    if ($canDelete) {
++        $actions .= '<form method="post" style="display:inline" action="' . h(url('/employees.php?action=delete')) . '"'
++                  . ' onsubmit="return confirm(\'Permanently delete ' . h(addslashes($e['name'])) . '? This cannot be undone.\');">'
++                  . csrf_field()
++                  . '<input type="hidden" name="id" value="' . (int)$e['id'] . '">'
++                  . '<button class="btn btn-icon btn-danger" type="submit" title="Delete employee" aria-label="Delete employee">🗑 <span class="dt-action-label">Delete</span></button></form>';
++    }
++
++    return [
++        'name'     => $name,
++        'status'   => $status,
++        '_actions' => dt_actions_wrap($actions),
++    ];
++};
++
++$dt = data_table_run($dtCfg, $rowRenderer);
++// data_table_run() exits before reaching here on JSON requests.
++
++$page_title  = 'Employees';
++$page_module = 'employees';
++$focus_id    = '';
++
++$actionsHtml = '';
++if ($canCreate) {
++    $actionsHtml = '<a class="btn btn-primary btn-sm" href="' . h(url('/employees.php?action=new')) . '"'
++                 . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New employee', 'N') . '</a>';
++}
++$dtCfg['title']        = 'Employees';
++$dtCfg['actions_html'] = $actionsHtml;
++
++require __DIR__ . '/includes/header.php';
++?>
++<?php data_table_render($dtCfg, $dt, $rowRenderer); ?>
++<?php require __DIR__ . '/includes/footer.php'; ?>
+diff --git a/includes/header.php b/includes/header.php
+index a29d7ce..f44015d 100644
+--- a/includes/header.php
++++ b/includes/header.php
+@@ -254,6 +254,9 @@ $flashes   = flash_pull();
+                     <div class="user-role"><?= h($user['email']) ?></div>
+                 </div>
+             </div>
++            <a href="<?= h(url('/account.php?action=password')) ?>" class="account-link">
++                🔑 Change password
++            </a>
+             <a href="<?= h(url('/logout.php')) ?>" class="logout"
+                data-shortcut="L" accesskey="l" data-no-spa>
+                 <?= shortcut_label('Sign out', 'L') ?>
+diff --git a/includes/helpers.php b/includes/helpers.php
+index 2d0e275..e5c7ecb 100644
+--- a/includes/helpers.php
++++ b/includes/helpers.php
+@@ -702,3 +702,93 @@ function magdyn_setting($key, $default = '')
+     }
+     return $cache[$key] ?? $default;
+ }
++
++
++/**
++ * Codes of the "held" inventory locations whose stock is tracked but is
++ * NOT available for consumption. Qty parked here (imported from the old
++ * system's "Lost In Process" / "Sample" buckets) may only be added to or
++ * moved between locations — it must never count toward Available, nor be
++ * selectable as a source for a Process (build) or a Shipment line.
++ *
++ *   LOC-LIP  → old "Lost In Process"
++ *   LOC-SMP  → old "Sample"
++ *
++ * Returned as plain codes so callers can build SQL IN() lists or compare
++ * against a location row's code. Matching everywhere is case-insensitive
++ * (utf8mb4_unicode_ci), mirroring how LOC-REJ / I-Rework are matched.
++ */
++if (!function_exists('inv_held_location_codes')) {
++    function inv_held_location_codes()
++    {
++        return ['LOC-LIP', 'LOC-SMP'];
++    }
++}
++
++/**
++ * SQL fragment "'LOC-LIP','LOC-SMP'" for use inside an IN(...) clause.
++ * Codes are constants from inv_held_location_codes(), never user input,
++ * but we still addslashes() defensively to match the surrounding style.
++ */
++if (!function_exists('inv_held_location_codes_sql')) {
++    function inv_held_location_codes_sql()
++    {
++        return "'" . implode("','", array_map(function ($c) {
++            return addslashes($c);
++        }, inv_held_location_codes())) . "'";
++    }
++}
++
++/**
++ * Validate that a password is "hard" enough to be accepted.
++ *
++ * Policy:
++ *   - at least 10 characters
++ *   - at least one lowercase letter
++ *   - at least one uppercase letter
++ *   - at least one digit
++ *   - at least one symbol (non-alphanumeric)
++ *   - must not contain the username or the email local-part (case-insensitive)
++ *
++ * Returns an array of human-readable error strings; an empty array means the
++ * password passes. `$context` may carry 'username' and 'email' to reject
++ * passwords that embed the account identity.
++ */
++if (!function_exists('password_strength_errors')) {
++    function password_strength_errors($password, array $context = [])
++    {
++        $password = (string)$password;
++        $errors   = [];
++
++        if (strlen($password) < 10) {
++            $errors[] = 'Password must be at least 10 characters long.';
++        }
++        if (!preg_match('/[a-z]/', $password)) {
++            $errors[] = 'Password must contain a lowercase letter.';
++        }
++        if (!preg_match('/[A-Z]/', $password)) {
++            $errors[] = 'Password must contain an uppercase letter.';
++        }
++        if (!preg_match('/[0-9]/', $password)) {
++            $errors[] = 'Password must contain a number.';
++        }
++        if (!preg_match('/[^A-Za-z0-9]/', $password)) {
++            $errors[] = 'Password must contain a symbol (e.g. ! @ # $ %).';
++        }
++
++        $needles = [];
++        if (!empty($context['username'])) $needles[] = (string)$context['username'];
++        if (!empty($context['email'])) {
++            $local = explode('@', (string)$context['email'])[0];
++            if ($local !== '') $needles[] = $local;
++        }
++        foreach ($needles as $needle) {
++            if ($needle !== '' && stripos($password, $needle) !== false) {
++                $errors[] = 'Password must not contain your username or email.';
++                break;
++            }
++        }
++
++        return $errors;
++    }
++}
+diff --git a/includes/inventory/bom_lines.php b/includes/inventory/bom_lines.php
+index 47750d6..b58f452 100644
+--- a/includes/inventory/bom_lines.php
++++ b/includes/inventory/bom_lines.php
+@@ -50,8 +50,12 @@
+ //
+ // IDEMPOTENCY
+ // -----------
+-// Items keyed on `code`: pre-existing items are reused, never modified
+-// by the importer. Edges keyed on (parent_id, child_id) with no
++// Items keyed on `code`: pre-existing items are UPDATED in place — every
++// import-sourced field (descriptions, dwg/rev, part_no, specs, division,
++// min stock/order) is re-synced on each import, so pressing Import again
++// brings the row back in sync with the old system. Part Rev No goes to the
++// part_rev_no column for finished goods, or into `notes` for other items
++// (see bom_import_part_rev_placement). Edges keyed on (parent_id, child_id) with no
+ // ref_designator. With upsert ON, an existing edge has its qty/sort
+ // updated. With upsert OFF, it's skipped.
+ //
+@@ -305,6 +309,7 @@ function bom_import_hierarchical_parse(array $parsedRows) {
+             'dwg_no'           => trim((string)($row['dwg_no'] ?? '')),
+             'dwg_rev_no'       => trim((string)($row['rev_no'] ?? '')),
+             'part_no'          => trim((string)($row['part_no'] ?? '')),
++            'part_rev_no'      => trim((string)($row['part_rev_no'] ?? '')),
+             'process_spec'     => trim((string)($row['process spec'] ?? '')),
+             'material_spec'    => trim((string)($row['material spec'] ?? '')),
+             'min_stock_level'  => trim((string)($row['min stock level'] ?? '')),
+@@ -483,6 +488,50 @@ function bom_import_check_cross_row_cycles_hier(array $items, array &$edgeResult
+     }
+ }
+ 
++// ------------------------------------------------------------
++// Decide where an item's Part Rev No goes.
++//
++// inv_items carries a UNIQUE index on (part_no, part_rev_no) for the
++// product catalog. The legacy BOM models one physical part's process
++// route as several items that all share the same part_no AND part rev
++// (e.g. the finished plate + its "Laser Cut Blank" + "Forming" stages),
++// so writing the real rev onto every one of them would collide.
++//
++// Rule (per business decision): only FINISHED GOODS (category 'finshd')
++// carry part_rev_no in the column — they are the unique catalog rows.
++// For every other item the rev is recorded in `notes` ("Part Rev No: X")
++// for future reference, and the column is left NULL so it never clashes.
++//
++// Returns ['col' => string|null, 'finished' => bool].
++function bom_import_part_rev_placement(array $it) {
++    $partRev  = isset($it['part_rev_no']) ? trim((string)$it['part_rev_no']) : '';
++    $finished = (isset($it['category_code']) ? $it['category_code'] : '') === 'finshd';
++    return [
++        'rev'      => $partRev,
++        'finished' => $finished,
++        'col'      => ($finished && $partRev !== '') ? $partRev : null,
++    ];
++}
++
++// Merge a Part Rev No tag into an existing notes blob, idempotently.
++// Strips any prior auto-written "Part Rev No: …" line first, so a second
++// import never stacks duplicate tags. Passing an empty $partRev just
++// removes the tag (used when an item is/becomes a finished good and the
++// rev lives in the column instead). Returns null when nothing is left.
++function bom_import_notes_set_part_rev($existingNotes, $partRev) {
++    $partRev = trim((string)$partRev);
++    $lines   = preg_split('/\r\n|\r|\n/', (string)$existingNotes);
++    $kept    = [];
++    foreach ($lines as $ln) {
++        if (preg_match('/^\s*Part Rev No\s*:/i', $ln)) continue;
++        $kept[] = $ln;
++    }
++    $base = trim(implode("\n", $kept));
++    if ($partRev === '') return $base !== '' ? $base : null;
++    $tag = 'Part Rev No: ' . $partRev;
++    return $base !== '' ? ($base . "\n" . $tag) : $tag;
++}
++
+ // ------------------------------------------------------------
+ // Insert ONE new inv_items row from a parsed item. Returns the new id.
+ // Shared by the single-shot (bom_import_commit_hierarchical) and the
+@@ -495,6 +544,9 @@ function bom_import_insert_one_item($code, array $it, $fks, array &$divCache, ar
+     // Resolve (or auto-create) the division for this row. Empty I_Division
+     // resolves to a fallback '__unknown' division so the FK stays valid.
+     $divId = bom_import_resolve_division($it['division_name'], $divCache, $divCreatedNow);
++    // Part Rev No: column for finished goods, notes for everything else.
++    $pr        = bom_import_part_rev_placement($it);
++    $notesVal  = $pr['finished'] ? null : bom_import_notes_set_part_rev(null, $pr['rev']);
+     db_exec(
+         "INSERT INTO inv_items
+             (code, name, short_description, long_description,
+@@ -508,12 +560,12 @@ function bom_import_insert_one_item($code, array $it, $fks, array &$divCache, ar
+              is_active, is_product, created_at, updated_at)
+          VALUES (?, ?, ?, ?,
+                  ?, ?, 'internal',
+-                 ?, ?, ?, ?, NULL,
++                 ?, ?, ?, ?, ?,
+                  ?, NULL, NULL,
+                  NULL, NULL,
+                  ?, ?,
+                  0, 0,
+-                 ?, NULL, NULL,
++                 ?, NULL, ?,
+                  1, ?, NOW(), NOW())",
+         [
+             $code,
+@@ -526,15 +578,72 @@ function bom_import_insert_one_item($code, array $it, $fks, array &$divCache, ar
+             $it['dwg_no']     !== '' ? $it['dwg_no']     : null,
+             $it['dwg_rev_no'] !== '' ? $it['dwg_rev_no'] : null,
+             $it['part_no']    !== '' ? $it['part_no']    : null,
++            $pr['col'],
+             $it['process_spec'] !== '' ? $it['process_spec'] : null,
+             $minStock, $minOrder,
+             $it['material_spec'] !== '' ? $it['material_spec'] : null,
++            $notesVal,
+             $it['is_root'] ? 1 : 0,
+         ]
+     );
+     return (int)db_val('SELECT LAST_INSERT_ID()');
+ }
+ 
++// ------------------------------------------------------------
++// Update an EXISTING inv_items row from a parsed item (re-import).
++// Refreshes every import-sourced column so a second import press
++// brings the row back in sync with the old system. is_product /
++// is_active / stock are deliberately left untouched (managed in
++// MagDyn, not by the importer).
++// ------------------------------------------------------------
++function bom_import_update_one_item($id, array $it, $fks, array &$divCache, array &$divCreatedNow) {
++    $minStock = is_numeric($it['min_stock_level']) ? (float)$it['min_stock_level'] : null;
++    $minOrder = is_numeric($it['min_order_qty'])  ? (float)$it['min_order_qty']  : null;
++    $divId = bom_import_resolve_division($it['division_name'], $divCache, $divCreatedNow);
++    // Part Rev No: column for finished goods, notes for everything else.
++    // For finished goods we also strip any prior "Part Rev No:" note tag so
++    // the rev isn't recorded in two places; for others we re-tag the notes
++    // (preserving any manual notes the row already carries).
++    $pr        = bom_import_part_rev_placement($it);
++    $curNotes  = db_val('SELECT notes FROM inv_items WHERE id = ?', [(int)$id], null);
++    $notesVal  = bom_import_notes_set_part_rev($curNotes, $pr['finished'] ? '' : $pr['rev']);
++    db_exec(
++        "UPDATE inv_items SET
++             name             = ?,
++             short_description = ?,
++             long_description = ?,
++             category_id      = ?,
++             division_id      = ?,
++             dwg_no           = ?,
++             dwg_rev_no       = ?,
++             part_no          = ?,
++             part_rev_no      = ?,
++             process_spec     = ?,
++             min_stock_level  = ?,
++             min_order_qty    = ?,
++             material_spec    = ?,
++             notes            = ?,
++             updated_at       = NOW()
++         WHERE id = ?",
++        [
++            $it['name'],
++            $it['name'],
++            $it['long_description'] !== '' ? $it['long_description'] : null,
++            $fks['cat_id_by_code'][$it['category_code']],
++            $divId,
++            $it['dwg_no']     !== '' ? $it['dwg_no']     : null,
++            $it['dwg_rev_no'] !== '' ? $it['dwg_rev_no'] : null,
++            $it['part_no']    !== '' ? $it['part_no']    : null,
++            $pr['col'],
++            $it['process_spec'] !== '' ? $it['process_spec'] : null,
++            $minStock, $minOrder,
++            $it['material_spec'] !== '' ? $it['material_spec'] : null,
++            $notesVal,
++            (int)$id,
++        ]
++    );
++}
++
+ // ------------------------------------------------------------
+ // Commit: in one transaction, create missing items then write edges.
+ // ------------------------------------------------------------
+@@ -547,9 +656,15 @@ function bom_import_commit_hierarchical(array $items, array $edgeResult, $fks, a
+         // 1) Items
+         foreach ($items as $code => $it) {
+             if ($it['action'] === 'reuse') {
+-                $codeToId[$code] = $it['existing_id'];
+-                $stats['items_reused']++;
+-                continue;
++                $eid = (int)$it['existing_id'];
++                if ($eid <= 0) $eid = (int)db_val('SELECT id FROM inv_items WHERE code = ?', [$code], 0);
++                if ($eid > 0) {
++                    bom_import_update_one_item($eid, $it, $fks, $divCache, $divCreatedNow);
++                    $codeToId[$code] = $eid;
++                    $stats['items_updated']++;
++                    continue;
++                }
++                // Row vanished since parse — fall through and recreate it.
+             }
+             $codeToId[$code] = bom_import_insert_one_item($code, $it, $fks, $divCache, $divCreatedNow);
+             $stats['items_created']++;
+@@ -609,14 +724,14 @@ function bom_import_render_preview_hier($title, $token, $upsert, array $items, a
+             <h1><?= h($title) ?></h1>
+             <p class="muted">
+                 Review the items and edges below. Items keyed on code — pre-existing items
+-                are reused (never modified). Edges flagged red will be skipped on commit.
++                are updated in place (all fields re-synced from the old system). Edges flagged red will be skipped on commit.
+             </p>
+         </div>
+     </div>
+ 
+     <div class="import-summary" style="margin-bottom: 14px;">
+         <span class="pill pill-success">+ Items create: <?= count($itemsCreate) ?></span>
+-        <span class="pill pill-neutral">⊙ Items reuse: <?= count($itemsReuse) ?></span>
++        <span class="pill pill-info">⟳ Items update: <?= count($itemsReuse) ?></span>
+         <span class="pill pill-success">✓ Edges insert: <?= (int)$edgeResult['counts']['insert'] ?></span>
+         <span class="pill pill-info">⟳ Edges update: <?= (int)$edgeResult['counts']['update'] ?></span>
+         <span class="pill pill-neutral">⊘ Edges skip: <?= (int)$edgeResult['counts']['skip'] ?></span>
+@@ -701,7 +816,7 @@ function bom_import_render_preview_hier($title, $token, $upsert, array $items, a
+         function showStats(s) {
+             if (!s) return;
+             liveEl.textContent =
+-                'items: ' + s.items_created + ' created / ' + s.items_reused + ' reused · ' +
++                'items: ' + s.items_created + ' created / ' + (s.items_updated || 0) + ' updated / ' + s.items_reused + ' reused · ' +
+                 'edges: ' + s.edges_inserted + ' inserted / ' + s.edges_updated + ' updated · ' +
+                 'stock: ' + s.stocks_imported + ' set';
+         }
+@@ -977,7 +1092,7 @@ if ($action === 'bom_import_commit') {
+     $edges   = bom_import_resolve_edges($parsedH['items'], $parsedH['edges'], $upsert);
+     bom_import_check_cross_row_cycles_hier($parsedH['items'], $edges);
+ 
+-    $stats = ['items_created' => 0, 'items_reused' => 0,
++    $stats = ['items_created' => 0, 'items_reused' => 0, 'items_updated' => 0,
+               'edges_inserted' => 0, 'edges_updated' => 0,
+               'divisions_created' => 0, 'divisions_created_names' => [],
+               'error' => ''];
+@@ -1002,8 +1117,8 @@ if ($action === 'bom_import_commit') {
+     );
+ 
+     $msg = sprintf(
+-        'BOM import complete · items: %d created / %d reused · edges: %d inserted / %d updated',
+-        $stats['items_created'], $stats['items_reused'],
++        'BOM import complete · items: %d created / %d updated / %d reused · edges: %d inserted / %d updated',
++        $stats['items_created'], (int)($stats['items_updated'] ?? 0), $stats['items_reused'],
+         $stats['edges_inserted'], $stats['edges_updated']
+     );
+     if (!empty($stats['divisions_created'])) {
+@@ -1067,6 +1182,8 @@ function bom_import_parse_json_response(array $jsonData) {
+                                     ? $jItem['rev_no'] : '')),
+             'part_no'          => trim((string)(isset($jItem['part_no'])
+                                     ? $jItem['part_no'] : '')),
++            'part_rev_no'      => trim((string)(isset($jItem['part_rev_no'])
++                                    ? $jItem['part_rev_no'] : '')),
+             'process_spec'     => trim((string)(isset($jItem['process_spec'])
+                                     ? $jItem['process_spec'] : '')),
+             'material_spec'    => trim((string)(isset($jItem['material_spec'])
+@@ -1383,10 +1500,26 @@ function bom_batch_commit_items(array $plan, $offset, array &$stats) {
+         foreach ($codes as $code) {
+             $it = isset($plan['items'][$code]) ? $plan['items'][$code] : null;
+             if ($it === null) continue;
+-            if ($it['action'] === 'reuse') { $stats['items_reused']++; continue; }
+-            // Retry-safe: if a prior (partial) run already created it, reuse.
++            // Existing row → update every import-sourced value (re-import sync).
++            if ($it['action'] === 'reuse') {
++                $eid = (int)$it['existing_id'];
++                if ($eid <= 0) {
++                    $eid = (int)db_val('SELECT id FROM inv_items WHERE code = ?', [$code], 0);
++                }
++                if ($eid > 0) {
++                    bom_import_update_one_item($eid, $it, $fks, $divCache, $divCreatedNow);
++                    $stats['items_updated']++;
++                    continue;
++                }
++                // Row vanished since prepare — fall through and recreate it.
++            }
++            // Retry-safe: if a prior run already created it, update in place.
+             $existing = (int)db_val('SELECT id FROM inv_items WHERE code = ?', [$code], 0);
+-            if ($existing > 0) { $stats['items_reused']++; continue; }
++            if ($existing > 0) {
++                bom_import_update_one_item($existing, $it, $fks, $divCache, $divCreatedNow);
++                $stats['items_updated']++;
++                continue;
++            }
+             $createdIds[] = bom_import_insert_one_item($code, $it, $fks, $divCache, $divCreatedNow);
+             $stats['items_created']++;
+         }
+@@ -1472,8 +1605,8 @@ function bom_batch_commit_stock(array $plan, $offset, array &$stats) {
+ // ── build the human-readable completion message from accumulated stats ───────
+ function bom_old_import_build_summary(array $stats) {
+     $msg = sprintf(
+-        'BOM import complete · items: %d created / %d reused · edges: %d inserted / %d updated',
+-        (int)$stats['items_created'], (int)$stats['items_reused'],
++        'BOM import complete · items: %d created / %d updated / %d reused · edges: %d inserted / %d updated',
++        (int)$stats['items_created'], (int)($stats['items_updated'] ?? 0), (int)$stats['items_reused'],
+         (int)$stats['edges_inserted'], (int)$stats['edges_updated']
+     );
+     if (!empty($stats['divisions_created'])) {
+@@ -1505,6 +1638,7 @@ function bom_old_import_build_summary(array $stats) {
+ function bom_old_import_stats_brief(array $stats) {
+     return [
+         'items_created'   => (int)$stats['items_created'],
++        'items_updated'   => (int)($stats['items_updated'] ?? 0),
+         'items_reused'    => (int)$stats['items_reused'],
+         'edges_inserted'  => (int)$stats['edges_inserted'],
+         'edges_updated'   => (int)$stats['edges_updated'],
+@@ -1746,7 +1880,7 @@ if ($action === 'bom_old_import_commit') {
+     $edges   = bom_import_resolve_edges($parsedH['items'], $parsedH['edges'], $upsert);
+     bom_import_check_cross_row_cycles_hier($parsedH['items'], $edges);
+ 
+-    $stats = ['items_created' => 0, 'items_reused' => 0,
++    $stats = ['items_created' => 0, 'items_reused' => 0, 'items_updated' => 0,
+               'edges_inserted' => 0, 'edges_updated' => 0,
+               'divisions_created' => 0, 'divisions_created_names' => [],
+               'stocks_imported' => 0, 'stocks_zero_skip' => 0,
+@@ -1838,7 +1972,7 @@ if ($action === 'bom_old_import_commit_batch') {
+             bom_import_check_cross_row_cycles_hier($parsedH['items'], $edges);
+ 
+             $stats = [
+-                'items_created'  => 0, 'items_reused'   => 0,
++                'items_created'  => 0, 'items_reused'   => 0, 'items_updated' => 0,
+                 'edges_inserted' => 0, 'edges_updated'  => 0, 'edge_errors' => [],
+                 'divisions_created' => 0, 'divisions_created_names' => [],
+             ];
+@@ -2412,3 +2546,324 @@ if ($action === 'bom_delete_commit') {
+         redirect(url('/inventory.php?action=bom_view&id=' . $id));
+     }
+ }
++
++// ============================================================
++// RECEIPT VERIFY — mark shipments 'received' from the old
++// "Ship and Receipt Report" CSV
++// ============================================================
++//
++// FORMAT (one row per legacy transaction):
++//   TransID,ShipDt/DueDt (CrtDt),Status,Company/Vendor,Product,PoNo,Qty,Loc,Options
++//
++// A Status that CONTAINS "RX" means that transaction was RECEIVED on the
++// old server. Each legacy receipt transaction maps to exactly one
++// inv_shipment_lines row (line_kind='receive') via old_transaction_id.
++// For each matched receive line we:
++//   1. set the line's qty_received = qty_planned (so the view reads
++//      "full" instead of "N open"), and
++//   2. flip the parent shipment's status to 'received'.
++//
++// SCOPE: inv_shipments.status and inv_shipment_lines.qty_received are
++// touched. STOCK (inv_item_location_stock) is NOT — this is a status /
++// quantity reconciliation against the old system, not a live receiving
++// operation. No inv_receipts rows are created and no inventory txns are
++// posted, so on-hand stock is unchanged.
++//
++// Shipments already 'received' still get their matched lines' qty filled
++// (fixing the "received but open" inconsistency), but terminal shipments
++// ('closed'/'cancelled') are left entirely alone. Re-running is
++// idempotent — a line already at qty_received = qty_planned is a no-op.
++// Rows whose Status has no "RX" are skipped.
++
++// ------------------------------------------------------------
++// Parse the report rows and resolve each RX transaction to its shipment.
++// Returns the per-transaction detail + summary counts + the deduped set
++// of shipment ids that will flip to 'received' + the receive line ids
++// whose qty_received should be filled to qty_planned.
++// ------------------------------------------------------------
++function receipt_verify_resolve(array $parsedRows) {
++    $rx       = [];   // txn => first CSV line it appeared on
++    $rxStatus = [];   // txn => CSV status string (first occurrence)
++    $noRx     = 0;    // rows present but Status lacks "RX"
++    $noId     = 0;    // rows with no/invalid TransID
++    foreach ($parsedRows as $row) {
++        $txn    = (int)($row['transid'] ?? 0);
++        $status = (string)($row['status'] ?? '');
++        if ($txn <= 0) { $noId++; continue; }
++        if (stripos($status, 'RX') === false) { $noRx++; continue; }
++        if (!isset($rx[$txn])) {
++            $rx[$txn]       = (int)($row['_line'] ?? 0);
++            $rxStatus[$txn] = $status;
++        }
++    }
++
++    // Batch-resolve transactions → receive line → shipment in IN-chunks.
++    $found = [];   // txn => line+shipment row
++    $ids   = array_keys($rx);
++    foreach (array_chunk($ids, 1000) as $chunk) {
++        $ph  = implode(',', array_fill(0, count($chunk), '?'));
++        $res = db_all(
++            "SELECT l.old_transaction_id AS txn, l.id AS line_id,
++                    l.qty_planned, l.qty_received,
++                    l.shipment_id, s.status, s.ship_no
++               FROM inv_shipment_lines l
++               JOIN inv_shipments s ON s.id = l.shipment_id
++              WHERE l.line_kind = 'receive'
++                AND l.old_transaction_id IN ($ph)",
++            $chunk
++        );
++        foreach ($res as $r) {
++            $found[(int)$r['txn']] = $r;   // txn is unique to one receive line
++        }
++    }
++
++    $detail            = [];
++    $shipmentsToUpdate = [];   // shipment_id => ship_no (deduped) — status flip
++    $linesToFill       = [];   // line_id => qty_planned — qty_received backfill
++    $counts = ['update' => 0, 'already' => 0, 'terminal' => 0, 'unmatched' => 0];
++    foreach ($rx as $txn => $line) {
++        if (!isset($found[$txn])) {
++            $counts['unmatched']++;
++            $detail[] = ['txn' => $txn, 'line' => $line, 'csv_status' => $rxStatus[$txn],
++                         'ship_no' => null, 'cur' => null, 'action' => 'unmatched', 'fill' => false];
++            continue;
++        }
++        $f        = $found[$txn];
++        $cur      = (string)$f['status'];
++        $sid      = (int)$f['shipment_id'];
++        $lineId   = (int)$f['line_id'];
++        $planned  = (float)$f['qty_planned'];
++        $received = (float)$f['qty_received'];
++        $terminal = ($cur === 'closed' || $cur === 'cancelled');
++
++        // Fill qty on any non-terminal matched line that isn't already full.
++        // (Even already-'received' shipments get their open lines filled, so
++        // the "received but open" inconsistency is corrected.)
++        $willFill = (!$terminal && $received + 0.0001 < $planned);
++        if ($willFill) $linesToFill[$lineId] = $planned;
++
++        if ($cur === 'received') {
++            $counts['already']++; $act = 'already';
++        } elseif ($terminal) {
++            $counts['terminal']++; $act = 'terminal';
++        } else {
++            $counts['update']++; $act = 'update';
++            $shipmentsToUpdate[$sid] = (string)$f['ship_no'];
++        }
++        $detail[] = ['txn' => $txn, 'line' => $line, 'csv_status' => $rxStatus[$txn],
++                     'ship_no' => (string)$f['ship_no'], 'cur' => $cur,
++                     'action' => $act, 'shipment_id' => $sid, 'fill' => $willFill];
++    }
++
++    return [
++        'detail'              => $detail,
++        'counts'              => $counts,
++        'shipments_to_update' => $shipmentsToUpdate,
++        'lines_to_fill'       => $linesToFill,
++        'no_rx'               => $noRx,
++        'no_id'               => $noId,
++        'rx_total'            => count($rx),
++    ];
++}
++
++if ($action === 'receipt_verify_preview') {
++    // Marking shipments received is a shipment/receipt operation —
++    // gate it on that module, not on BOM permissions.
++    require_permission('inventory_shiprcpt', 'manage');
++    csrf_check();
++
++    $parsed = import_parse_uploaded_csv('csv');
++    if (empty($parsed['ok'])) {
++        flash_set('error', $parsed['error']);
++        redirect(url('/inventory.php?action=bom_grid'));
++    }
++    $hdr = $parsed['header'] ?? [];
++    if (!in_array('transid', $hdr, true) || !in_array('status', $hdr, true)) {
++        flash_set('error', 'CSV is missing the required TransID / Status columns '
++                         . '(expected the "Ship and Receipt Report" format).');
++        redirect(url('/inventory.php?action=bom_grid'));
++    }
++
++    $token = import_stash($parsed['csv_text'], 'receipt_verify');
++    $r     = receipt_verify_resolve($parsed['rows']);
++
++    $distinctShipments = count($r['shipments_to_update']);
++    $linesToFill       = count($r['lines_to_fill']);
++
++    $page_title  = 'Verify received · preview';
++    $page_module = 'inventory_shiprcpt';
++    require dirname(__DIR__, 2) . '/includes/header.php';
++
++    $commitUrl = url('/inventory.php?action=receipt_verify_commit');
++    $cancelUrl = url('/inventory.php?action=bom_grid');
++    ?>
++    <div class="page-head">
++        <div>
++            <h1>Verify received · preview</h1>
++            <p class="muted">
++                For every legacy receipt transaction whose <code>Status</code> contains
++                <code>RX</code>, the matched receive line's <strong>received qty is set to its
++                planned qty</strong> (so it reads "full") and the parent shipment is marked
++                <strong>received</strong>. <strong>Stock is not changed</strong> — no inventory
++                txns are posted. Terminal shipments (closed / cancelled) are left alone.
++            </p>
++        </div>
++    </div>
++
++    <div class="import-summary" style="margin-bottom:14px;">
++        <span class="pill pill-success">✓ Shipments to mark received: <?= (int)$distinctShipments ?></span>
++        <span class="pill pill-success">▦ Receive lines to fill (qty): <?= (int)$linesToFill ?></span>
++        <span class="pill pill-info">⟳ Transactions matched: <?= (int)$r['counts']['update'] ?></span>
++        <span class="pill pill-neutral">✓ Already received: <?= (int)$r['counts']['already'] ?></span>
++        <span class="pill pill-neutral">⊘ Closed/cancelled (left alone): <?= (int)$r['counts']['terminal'] ?></span>
++        <span class="pill pill-danger">✗ Unmatched transactions: <?= (int)$r['counts']['unmatched'] ?></span>
++    </div>
++    <p class="muted small" style="margin-top:-6px;margin-bottom:14px;">
++        RX rows in file: <?= (int)$r['rx_total'] ?>
++        · rows without RX (skipped): <?= (int)$r['no_rx'] ?>
++        <?php if ($r['no_id'] > 0): ?> · rows without a TransID: <?= (int)$r['no_id'] ?><?php endif; ?>
++    </p>
++
++    <?php $nothingToDo = ($distinctShipments === 0 && $linesToFill === 0); ?>
++    <div class="import-actions" style="margin-bottom:18px;">
++        <form method="post" action="<?= h($commitUrl) ?>" style="display:inline"
++              onsubmit="return confirm('Mark <?= (int)$distinctShipments ?> shipment(s) received and fill <?= (int)$linesToFill ?> receive line(s) to planned qty? Stock is not changed.');">
++            <?= csrf_field() ?>
++            <input type="hidden" name="token" value="<?= h($token) ?>">
++            <button type="submit" class="btn btn-primary" <?= $nothingToDo ? 'disabled' : '' ?>>
++                Mark <?= (int)$distinctShipments ?> shipment<?= $distinctShipments === 1 ? '' : 's' ?> received
++            </button>
++        </form>
++        <a class="btn btn-ghost" href="<?= h($cancelUrl) ?>">Cancel</a>
++    </div>
++
++    <?php
++    // Cap the detail table — these reports run to thousands of rows and we
++    // don't need to paint every one to let the user sanity-check the result.
++    $cap     = 1000;
++    $shown   = array_slice($r['detail'], 0, $cap);
++    $hidden  = count($r['detail']) - count($shown);
++    ?>
++    <div class="card" style="margin-bottom:18px;">
++        <div class="card-head"><h3 style="margin:0;font-size:15px;">Transactions (<?= count($r['detail']) ?>)</h3></div>
++        <div class="card-body" style="padding:0">
++            <table class="data-table">
++                <thead><tr>
++                    <th>Action</th><th>TransID</th><th>CSV status</th>
++                    <th>Shipment</th><th>Current status</th><th>Fill qty</th><th>CSV line</th>
++                </tr></thead>
++                <tbody>
++                    <?php foreach ($shown as $d):
++                        $pill = 'pill-neutral'; $label = strtoupper($d['action']);
++                        if      ($d['action'] === 'update')    { $pill = 'pill-success'; $label = 'RECEIVE'; }
++                        elseif  ($d['action'] === 'already')   { $pill = 'pill-info';    $label = 'ALREADY'; }
++                        elseif  ($d['action'] === 'terminal')  { $pill = 'pill-neutral'; $label = 'SKIP'; }
++                        elseif  ($d['action'] === 'unmatched') { $pill = 'pill-danger';  $label = 'NO MATCH'; }
++                    ?>
++                        <tr>
++                            <td><span class="pill <?= $pill ?>"><?= h($label) ?></span></td>
++                            <td><code><?= (int)$d['txn'] ?></code></td>
++                            <td class="muted small"><?= h($d['csv_status']) ?></td>
++                            <td><?= $d['ship_no'] !== null ? '<code>' . h($d['ship_no']) . '</code>' : '<span class="muted">—</span>' ?></td>
++                            <td class="muted small"><?= $d['cur'] !== null ? h($d['cur']) : '—' ?></td>
++                            <td class="muted small"><?= !empty($d['fill']) ? '✓' : '—' ?></td>
++                            <td class="muted small"><?= (int)$d['line'] ?></td>
++                        </tr>
++                    <?php endforeach; ?>
++                </tbody>
++            </table>
++            <?php if ($hidden > 0): ?>
++                <div class="muted small" style="padding:10px 14px;">
++                    … and <?= (int)$hidden ?> more transaction<?= $hidden === 1 ? '' : 's' ?> not shown.
++                    The counts above cover every row; the commit applies to all of them.
++                </div>
++            <?php endif; ?>
++        </div>
++    </div>
++    <?php
++    require dirname(__DIR__, 2) . '/includes/footer.php';
++    exit;
++}
++
++if ($action === 'receipt_verify_commit') {
++    require_permission('inventory_shiprcpt', 'manage');
++    csrf_check();
++
++    $token = (string)input('token', '');
++    $csv   = import_unstash($token, 'receipt_verify');
++    if ($csv === null) {
++        flash_set('error', 'Verify session expired. Please re-upload the CSV.');
++        redirect(url('/inventory.php?action=bom_grid'));
++    }
++    $parsed = import_parse_csv_text($csv);
++    if (empty($parsed['ok'])) {
++        flash_set('error', 'Re-parse failed: ' . ($parsed['error'] ?? 'unknown'));
++        redirect(url('/inventory.php?action=bom_grid'));
++    }
++
++    $r        = receipt_verify_resolve($parsed['rows']);
++    $shipIds  = array_keys($r['shipments_to_update']);
++    $lineIds  = array_keys($r['lines_to_fill']);
++
++    $updated     = 0;   // shipments flipped to received
++    $linesFilled = 0;   // receive lines whose qty_received was filled
++    if (!empty($shipIds) || !empty($lineIds)) {
++        db_exec('START TRANSACTION');
++        try {
++            // 1) Fill qty_received = qty_planned on matched receive lines.
++            //    The kind + remaining guards keep this idempotent and make a
++            //    ship line or already-full line impossible to touch. Stock is
++            //    untouched: this is a raw column update, not a posted receipt.
++            foreach (array_chunk($lineIds, 500) as $chunk) {
++                $ph = implode(',', array_fill(0, count($chunk), '?'));
++                $linesFilled += db_exec(
++                    "UPDATE inv_shipment_lines
++                        SET qty_received = qty_planned
++                      WHERE id IN ($ph)
++                        AND line_kind = 'receive'
++                        AND qty_received < qty_planned",
++                    $chunk
++                );
++            }
++            // 2) Flip shipment status to received. The status guard repeats
++            //    the resolve-time filter so a shipment that became terminal
++            //    between preview and commit is never dragged back.
++            foreach (array_chunk($shipIds, 500) as $chunk) {
++                $ph = implode(',', array_fill(0, count($chunk), '?'));
++                $updated += db_exec(
++                    "UPDATE inv_shipments
++                        SET status = 'received'
++                      WHERE id IN ($ph)
++                        AND status NOT IN ('received', 'closed', 'cancelled')",
++                    $chunk
++                );
++            }
++            db_exec('COMMIT');
++        } catch (Exception $e) {
++            db_exec('ROLLBACK');
++            flash_set('error', 'Verify failed: ' . $e->getMessage());
++            redirect(url('/inventory.php?action=bom_grid'));
++        }
++    }
++
++    db_exec(
++        "INSERT INTO audit_log (actor_id, action, target_id, details)
++         VALUES (?, 'inventory.shipment.receipt_verify', 0, ?)",
++        [current_user_id(), json_encode([
++            'shipments_marked_received' => $updated,
++            'lines_qty_filled'          => $linesFilled,
++            'rx_total'                  => $r['rx_total'],
++            'already_received'          => $r['counts']['already'],
++            'unmatched'                 => $r['counts']['unmatched'],
++        ])]
++    );
++
++    flash_set('success', sprintf(
++        'Receipt verify complete · %d shipment%s marked received · %d receive line%s filled to planned qty · %d already received · %d unmatched transaction%s.',
++        $updated, $updated === 1 ? '' : 's',
++        $linesFilled, $linesFilled === 1 ? '' : 's',
++        (int)$r['counts']['already'],
++        (int)$r['counts']['unmatched'], $r['counts']['unmatched'] === 1 ? '' : 's'
++    ));
++    redirect(url('/inventory.php?action=bom_grid'));
++}
+diff --git a/includes/inventory/bom_views.php b/includes/inventory/bom_views.php
+index cd44f0c..c53ec9f 100644
+--- a/includes/inventory/bom_views.php
++++ b/includes/inventory/bom_views.php
+@@ -1178,13 +1178,15 @@ if ($action === 'bom_grid') {
+     //
+     //   $qtyRejByItem[id]    = qty at LOC-REJ
+     //   $qtyReworkByItem[id] = qty at O-Rework + I-Rework
++    //   $qtyHeldByItem[id]   = qty at the held locations (LOC-LIP, LOC-SMP)
+     //   $qtyTotalByItem[id]  = SUM(qty) across ALL locations
+-    //   $avbByItem[id]       = qtyTotal - qtyRej - qtyRework (clamped to >= 0)
++    //   $avbByItem[id]       = qtyTotal - qtyRej - qtyRework - qtyHeld
++    //                          (clamped to >= 0)
+     //   $tbrByItem[id]       = open receive balance from Ship & Receipt
+     //
+     // Location filter is by CODE (case-insensitive, exact match), so the
+     // semantics are stable even if location IDs change. If any of the
+-    // three special locations don't exist in this database, the matching
++    // special locations don't exist in this database, the matching
+     // aggregate for that location is just empty — safe, no error.
+     // ----------------------------------------------------------------
+     $rejCodes    = ['LOC-REJ'];
+@@ -1192,22 +1194,25 @@ if ($action === 'bom_grid') {
+ 
+     $qtyRejByItem    = [];
+     $qtyReworkByItem = [];
++    $qtyHeldByItem   = [];
+     $qtyTotalByItem  = [];
+ 
+-    // Build a single query that returns per-item totals split into three
+-    // buckets — rej, rework, all — in one pass. CASE-style sum is faster
+-    // than three separate queries on Hostinger's MariaDB.
++    // Build a single query that returns per-item totals split into four
++    // buckets — rej, rework, held, all — in one pass. CASE-style sum is
++    // faster than separate queries on Hostinger's MariaDB.
+     //
+     // NOTE: the location table is `locations` (Assets and Inventory share
+     // it after the 2026-05-17 unify-locations migration). The old
+     // `inv_locations` table no longer exists.
+     $rejInList    = "'" . implode("','", array_map(function ($c) { return addslashes($c); }, $rejCodes))    . "'";
+     $reworkInList = "'" . implode("','", array_map(function ($c) { return addslashes($c); }, $reworkCodes)) . "'";
++    $heldInList   = inv_held_location_codes_sql();   // LOC-LIP, LOC-SMP
+ 
+     foreach (db_all(
+         "SELECT s.item_id,
+                 SUM(CASE WHEN l.code COLLATE utf8mb4_unicode_ci IN ($rejInList)    THEN s.qty ELSE 0 END) AS rej_qty,
+                 SUM(CASE WHEN l.code COLLATE utf8mb4_unicode_ci IN ($reworkInList) THEN s.qty ELSE 0 END) AS rework_qty,
++                SUM(CASE WHEN l.code COLLATE utf8mb4_unicode_ci IN ($heldInList)   THEN s.qty ELSE 0 END) AS held_qty,
+                 SUM(s.qty) AS total_qty
+            FROM inv_item_location_stock s
+            JOIN locations l ON l.id = s.location_id
+@@ -1216,6 +1221,7 @@ if ($action === 'bom_grid') {
+         $iid = (int)$r['item_id'];
+         $qtyRejByItem[$iid]    = (float)$r['rej_qty'];
+         $qtyReworkByItem[$iid] = (float)$r['rework_qty'];
++        $qtyHeldByItem[$iid]   = (float)$r['held_qty'];
+         $qtyTotalByItem[$iid]  = (float)$r['total_qty'];
+     }
+ 
+@@ -1383,12 +1389,19 @@ if ($action === 'bom_grid') {
+             <h2 class="dt-toolbar-title bom-actions-title">BOM tree</h2>
+             <div class="dt-toolbar-right">
+                 <?php if ($canCreateBoms || $canManageBoms): ?>
++                    <?php if (is_admin()): /* Old-inventory import is admin-only (Admin ▸ Old Inventory Import). */ ?>
+                     <a class="btn btn-sm btn-ghost" href="<?= h(url('/bom_old_import.php')) ?>"
+                        title="Auto-fetch all BOM trees from old inventory server and import">⬇ Import from Old System</a>
++                    <?php endif; ?>
+                     <button type="button" class="btn btn-sm btn-ghost"
+                             data-open-import="bom-import-modal"
+                             title="Import BOM lines from CSV">⤒ Import BOM CSV</button>
+                 <?php endif; ?>
++                <?php if (permission_check('inventory_shiprcpt', 'manage')): ?>
++                    <button type="button" class="btn btn-sm btn-ghost"
++                            data-open-import="receipt-verify-modal"
++                            title="Upload the old Ship &amp; Receipt Report CSV to mark received shipments">✓ Verify Received CSV</button>
++                <?php endif; ?>
+                 <?php if ($canManageBoms): ?>
+                     <button type="button" class="btn btn-sm btn-primary"
+                             data-open-bom-picker="1"
+@@ -1540,8 +1553,11 @@ if ($action === 'bom_grid') {
+                         $iidThis  = (int)$item['id'];
+                         $rejQty    = isset($qtyRejByItem[$iidThis])    ? $qtyRejByItem[$iidThis]    : 0.0;
+                         $reworkQty = isset($qtyReworkByItem[$iidThis]) ? $qtyReworkByItem[$iidThis] : 0.0;
++                        $heldQty   = isset($qtyHeldByItem[$iidThis])   ? $qtyHeldByItem[$iidThis]   : 0.0;
+                         $totalQty  = isset($qtyTotalByItem[$iidThis])  ? $qtyTotalByItem[$iidThis]  : 0.0;
+-                        $avbQty    = $totalQty - $rejQty - $reworkQty;
++                        // Held stock (LOC-LIP / LOC-SMP) is on-hand but not
++                        // available — excluded from Avb just like rej / rework.
++                        $avbQty    = $totalQty - $rejQty - $reworkQty - $heldQty;
+                         if ($avbQty < 0) $avbQty = 0.0;   // clamp; shouldn't go negative in normal data
+                         $tbrQty    = isset($tbrByItem[$iidThis]) ? $tbrByItem[$iidThis] : 0.0;
+                     ?>
+@@ -2134,6 +2150,21 @@ if ($action === 'bom_grid') {
+               . 'Cycle prevention runs across the union of existing BOM + this CSV.'
+         );
+     endif; ?>
++    <?php if (permission_check('inventory_shiprcpt', 'manage')):
++        import_modal_html(
++            'receipt-verify-modal',
++            'Verify received (Ship & Receipt Report CSV)',
++            url('/inventory.php?action=receipt_verify_preview'),
++            'Upload the old system\'s <strong>Ship and Receipt Report</strong> CSV '
++              . '(columns <code>TransID, …, Status, …</code>). Every transaction whose '
++              . '<code>Status</code> contains <code>RX</code> is matched to its receive '
++              . 'line by <code>TransID</code>; that line\'s received qty is set to its '
++              . 'planned qty and its shipment is marked <strong>received</strong>. '
++              . '<strong>Stock is not changed</strong> — no inventory txns are posted. '
++              . 'You\'ll see a preview before anything is committed.',
++            false  // no upsert toggle
++        );
++    endif; ?>
+     <?php require dirname(__DIR__, 2) . '/includes/footer.php'; exit;
+ }
+ 
+diff --git a/includes/inventory/txns.php b/includes/inventory/txns.php
+index f5fc218..43d36db 100644
+--- a/includes/inventory/txns.php
++++ b/includes/inventory/txns.php
+@@ -309,6 +309,27 @@ if ($action === 'txn_process') {
+         $childSource[(int)$lineId] = (int)$locId;
+     }
+ 
++    // Guard: held locations (LOC-LIP / LOC-SMP) may never be a consumption
++    // source — their stock is add/move only. The per-line picker already
++    // excludes them; this rejects a hand-crafted POST that tries anyway.
++    if ($childSource) {
++        $heldInList = inv_held_location_codes_sql();
++        $heldIds = [];
++        foreach (db_all(
++            "SELECT id FROM locations
++              WHERE code COLLATE utf8mb4_unicode_ci IN ($heldInList)"
++        ) as $hr) {
++            $heldIds[(int)$hr['id']] = true;
++        }
++        foreach ($childSource as $locId) {
++            if ($locId && isset($heldIds[$locId])) {
++                flash_set('error', 'Held stock (Lost In Process / Sample) cannot be '
++                    . 'consumed in a build. Move it to an available location first.');
++                redirect(url('/inventory.php?action=process'));
++            }
++        }
++    }
++
+     $errors = [];
+     if (!$productId) $errors[] = 'Item is required.';
+     if ($qty <= 0)   $errors[] = 'Quantity must be greater than zero.';
+@@ -402,9 +423,31 @@ if ($action === 'txn_process') {
+     try {
+         db()->beginTransaction();
+ 
++        // Resolve done_by employee IDs (users_info) + names up-front. The
++        // names are stamped into the header note ("Process done by …") as
++        // well as persisted to inv_txn_done_by below. Reads the multi-select
++        // POST `done_by[]`; unknown / duplicate IDs are silently dropped.
++        $doneByRaw = isset($_POST['done_by']) ? (array)$_POST['done_by'] : [];
++        $doneBy    = array_values(array_unique(array_filter(array_map('intval', $doneByRaw))));
++        $doneByNames = [];
++        if ($doneBy) {
++            $ph   = implode(',', array_fill(0, count($doneBy), '?'));
++            $rows = db_all("SELECT id, name FROM users_info WHERE id IN ($ph)", $doneBy);
++            $nameById = [];
++            foreach ($rows as $r) $nameById[(int)$r['id']] = $r['name'];
++            // Preserve the order the user picked them in.
++            foreach ($doneBy as $eid) {
++                if (isset($nameById[$eid])) $doneByNames[] = $nameById[$eid];
++            }
++        }
++
+         // 1. Increment the produced item at the DESTINATION location.
+-        $headerNote = $notes;
+-        if (!$headerNote) {
++        //    Header note = "Process done by <names>" + the user's notes.
++        $noteParts = [];
++        if ($doneByNames) $noteParts[] = 'Process done by ' . implode(', ', $doneByNames);
++        if ($notes)       $noteParts[] = $notes;
++        $headerNote = implode(' — ', $noteParts);
++        if ($headerNote === '') {
+             if ($directAddition) {
+                 $headerNote = 'Direct addition: ' . $qty . ' x ' . $product['code'];
+             } elseif ($reworkFlag) {
+@@ -421,11 +464,7 @@ if ($action === 'txn_process') {
+             null, $refDoc, $headerNote
+         );
+ 
+-        // Persist done_by: zero or more user IDs attached to the header
+-        // txn. Reads from the multi-select POST `done_by[]`. Silently
+-        // ignores duplicates and unknown IDs (FK + PK enforce sanity).
+-        $doneByRaw = isset($_POST['done_by']) ? (array)$_POST['done_by'] : [];
+-        $doneBy    = array_values(array_unique(array_filter(array_map('intval', $doneByRaw))));
++        // Persist done_by rows (PK on (txn_id, user_id) dedupes).
+         foreach ($doneBy as $uid) {
+             db_exec(
+                 'INSERT IGNORE INTO inv_txn_done_by (txn_id, user_id) VALUES (?, ?)',
+@@ -809,7 +848,16 @@ if ($action === 'process') {
+           WHERE i.is_active = 1
+        ORDER BY i.code"
+     );
+-    $locs = db_all('SELECT id, code, name FROM locations WHERE is_active = 1 ORDER BY sort_order, name');
++    // Source-location options for the per-child-line pickers. Held
++    // locations (LOC-LIP / LOC-SMP) are excluded — their stock is tracked
++    // but can never be consumed in a build, only added to or moved.
++    $heldInList = inv_held_location_codes_sql();
++    $locs = db_all(
++        "SELECT id, code, name FROM locations
++          WHERE is_active = 1
++            AND code COLLATE utf8mb4_unicode_ci NOT IN ($heldInList)
++          ORDER BY sort_order, name"
++    );
+     $preProduct = (int)input('product_id', 0);
+     $preDstLoc  = (int)input('dst_location_id', 0);
+ 
+@@ -845,15 +893,15 @@ if ($action === 'process') {
+         $locsForJs[] = ['id' => (int)$l['id'], 'name' => $l['name'], 'code' => $l['code']];
+     }
+ 
+-    // Active users for the "Done by" multi-select. Includes the current
+-    // user pre-selected so the common one-person case requires no clicks.
++    // Active employees (users_info) for the "Done by" multi-select. These
++    // are shop-floor / staff names (not login accounts), managed under
++    // Admin ▸ Employees. status = 1 means active.
+     $activeUsers = db_all(
+-        "SELECT id, full_name, email
+-           FROM users
+-          WHERE is_active = 1
+-          ORDER BY full_name, email"
++        "SELECT id, name
++           FROM users_info
++          WHERE status = 1
++          ORDER BY name"
+     );
+-    $currentUid = current_user_id();
+ 
+     $page_title  = 'Process inventory';
+     $page_module = 'inventory_process';
+@@ -922,16 +970,14 @@ if ($action === 'process') {
+                     <div class="field">
+                         <label for="f_done_by">Done by</label>
+                         <select id="f_done_by" name="done_by[]" multiple class="chips" tabindex="6"
+-                                data-placeholder="Pick one or more users…">
+-                            <?php foreach ($activeUsers as $u):
+-                                $sel = (int)$u['id'] === (int)$currentUid;
+-                            ?>
+-                                <option value="<?= (int)$u['id'] ?>" <?= $sel ? 'selected' : '' ?>>
+-                                    <?= h($u['full_name'] ?: $u['email']) ?>
++                                data-placeholder="Pick one or more employees…">
++                            <?php foreach ($activeUsers as $u): ?>
++                                <option value="<?= (int)$u['id'] ?>">
++                                    <?= h($u['name']) ?>
+                                 </option>
+                             <?php endforeach; ?>
+                         </select>
+-                        <span class="muted small">Logged-in user is pre-selected. Add others as needed.</span>
++                        <span class="muted small">Pick the employee(s) who performed this process. Manage the list under Admin ▸ Employees.</span>
+                     </div>
+ 
+                     <div class="field">
+diff --git a/includes/old_inventory_api.php b/includes/old_inventory_api.php
+index 5181813..4d0ebac 100644
+--- a/includes/old_inventory_api.php
++++ b/includes/old_inventory_api.php
+@@ -194,6 +194,87 @@ function old_inventory_notes_api(string $action, array $params = []): array
+     return $data;
+ }
+ 
++/**
++ * MagDyn — download a binary file from api_export_notes.php (notes_url).
++ *
++ * Used by the note-attachment file importer: the old server streams the
++ * physical file for a given attachment (located on disk by its original
++ * filename), and we write it straight to $destPath without buffering the
++ * whole payload in memory.
++ *
++ * Returns an array describing the outcome (never throws):
++ *   [ 'ok' => true,  'status' => 200, 'bytes' => 12345, 'mime' => '...' ]
++ *   [ 'ok' => false, 'status' => 404, 'error' => 'File missing on disk: …' ]
++ *
++ * A JSON body (the API's error shape) or any non-200 status is treated as a
++ * failure, so callers can tell "missing on source" (404) apart from success.
++ *
++ * @param array  $params   Query params (e.g. ['action' => 'attachment_file', 'tmp' => '<hash>'])
++ * @param string $destPath Absolute path to write the file to on success
++ */
++function old_inventory_notes_api_download(array $params, string $destPath): array
++{
++    static $cfg = null;
++    if ($cfg === null) {
++        $cfg = require __DIR__ . '/../config/old_inventory_api.php';
++    }
++    if (empty($cfg['notes_url'])) {
++        return ['ok' => false, 'status' => 0, 'error' => 'notes_url not set in config/old_inventory_api.php.'];
++    }
++
++    $params['token'] = $cfg['token'];
++    $url = rtrim($cfg['notes_url'], '/') . '?' . http_build_query($params);
++
++    $ctx = stream_context_create([
++        'http' => [
++            'method'        => 'GET',
++            'timeout'       => $cfg['timeout'],
++            'header'        => "Connection: close\r\n",
++            'ignore_errors' => true,   // still expose 4xx/5xx bodies
++        ],
++    ]);
++
++    $in = @fopen($url, 'rb', false, $ctx);
++    if ($in === false) {
++        return ['ok' => false, 'status' => 0, 'error' => 'Could not reach ' . $cfg['notes_url']];
++    }
++
++    // Parse status + content-type from the response headers PHP populates.
++    $status = 0;
++    $ctype  = '';
++    $hdrs   = isset($http_response_header) ? $http_response_header : [];
++    foreach ($hdrs as $h) {
++        if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) { $status = (int) $m[1]; }
++        if (stripos($h, 'Content-Type:') === 0)          { $ctype  = trim(substr($h, 13)); }
++    }
++
++    // The API signals errors as JSON (any status) — treat JSON or non-200 as a miss.
++    if ($status !== 200 || stripos($ctype, 'application/json') !== false) {
++        $body = stream_get_contents($in, 8192);
++        fclose($in);
++        $err  = 'HTTP ' . $status;
++        $j    = json_decode((string) $body, true);
++        if (is_array($j) && isset($j['error'])) { $err = $j['error']; }
++        return ['ok' => false, 'status' => $status, 'error' => $err];
++    }
++
++    $out = @fopen($destPath, 'wb');
++    if ($out === false) {
++        fclose($in);
++        return ['ok' => false, 'status' => $status, 'error' => 'Cannot open destination: ' . $destPath];
++    }
++    $bytes = stream_copy_to_stream($in, $out);
++    fclose($in);
++    fclose($out);
++
++    if ($bytes === false) {
++        @unlink($destPath);
++        return ['ok' => false, 'status' => $status, 'error' => 'Stream copy failed.'];
++    }
++
++    return ['ok' => true, 'status' => $status, 'bytes' => (int) $bytes, 'mime' => $ctype];
++}
++
+ /**
+  * MagDyn — Old Inventory invoice export API client.
+  *
+diff --git a/includes/permissions.php b/includes/permissions.php
+index c035f66..b7ba5d5 100644
+--- a/includes/permissions.php
++++ b/includes/permissions.php
+@@ -77,6 +77,22 @@ function require_permission($module, $action)
+     }
+ }
+ 
++/**
++ * True when the current (possibly impersonated) user holds the 'admin' role.
++ *
++ * Used to gate UI that should be admin-only regardless of any functional
++ * permission a non-admin role might also hold — e.g. the "Import from Old
++ * Inventory" buttons, which are now reachable only through the Admin ▸
++ * Old Inventory Import hub.
++ */
++function is_admin()
++{
++    foreach (current_user_roles() as $r) {
++        if (($r['code'] ?? '') === 'admin') return true;
++    }
++    return false;
++}
++
+ /** Returns role rows for current user. */
+ function current_user_roles()
+ {
+@@ -113,6 +129,32 @@ function visible_modules()
+     }
+     if (!$moduleCodes) return $cache = [];
+ 
++    // ---- Nav-visibility inheritance ----
++    // Some sidebar sub-links are thin nav wrappers around a page whose
++    // access is gated by a PARENT group's functional permission, not by
++    // the sub-link's own permission. The Assets group is the case: the
++    // 'asset' group module holds the real permissions (view/manage/...)
++    // and /asset.php checks 'asset.view', while 'asset_view_assets' /
++    // 'asset_view_models' exist only to render the menu links.
++    //
++    // Without this, an admin has to grant BOTH 'asset.view' AND the
++    // per-link permission for the Assets tab to appear — an easy-to-miss
++    // trap (the tab stays hidden even though the user can open the page).
++    // Here a sub-link inherits visibility from its parent permission, so
++    // granting 'asset.view' alone both reveals and opens the tab.
++    $navInherit = [
++        'asset.view'              => ['asset_view_assets', 'asset_view_models', 'asset_transactions'],
++        'invoice.view'            => ['invoice_view', 'invoice_new'],
++        'inspection.view'         => ['insp_new', 'insp_completed', 'insp_templates'],
++        'tools.view'              => ['tools_bubble', 'tools_cad', 'tools_weight', 'tools_calc'],
++        'inventory_shiprcpt.view' => ['inventory_shipments_list'],
++    ];
++    foreach ($navInherit as $parentPerm => $childCodes) {
++        if (in_array($parentPerm, $perms, true)) {
++            foreach ($childCodes as $cc) $moduleCodes[$cc] = true;
++        }
++    }
++
+     $in   = implode(',', array_fill(0, count($moduleCodes), '?'));
+     $rows = db_all(
+         "SELECT * FROM modules WHERE is_active = 1 AND code IN ($in) ORDER BY sort_order, name",
+diff --git a/inspection.php b/inspection.php
+index 9e75054..452c92e 100644
+--- a/inspection.php
++++ b/inspection.php
+@@ -2783,8 +2783,11 @@ if ($action === 'templates') {
+         . ($canCreate
+             ? ' <button type="button" class="btn btn-ghost btn-sm" id="tpl-import-btn"'
+               . ' title="Create a new template from a CSV file">⤒ Import CSV</button>'
+-              . ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_templates')) . '"'
+-              . ' title="Import inspection templates from the old inventory system">⬇ Import from Old Inventory</a>'
++              // Old-inventory import is admin-only (Admin ▸ Old Inventory Import).
++              . (is_admin()
++                  ? ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_templates')) . '"'
++                    . ' title="Import inspection templates from the old inventory system">⬇ Import from Old Inventory</a>'
++                  : '')
+               . ' <a class="btn btn-primary btn-sm" href="' . h(url('/inspection.php?action=template_new')) . '"'
+               . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New template', 'N') . '</a>'
+             : '');
+@@ -5734,8 +5737,11 @@ $rightActions =
+         ? ' <button type="button" class="btn btn-ghost btn-sm"'
+           . ' data-open-import="inspection-import-modal"'
+           . ' title="Import inspection records from CSV">⤒ Import CSV</button>'
+-          . ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_inspections')) . '"'
+-          . ' title="Import inspection records from the old inventory system">⬇ Import from Old Inventory</a>'
++          // Old-inventory import is admin-only (Admin ▸ Old Inventory Import).
++          . (is_admin()
++              ? ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_inspections')) . '"'
++                . ' title="Import inspection records from the old inventory system">⬇ Import from Old Inventory</a>'
++              : '')
+           . ' <a class="btn btn-primary btn-sm" href="' . h(url('/inspection.php?action=new')) . '"'
+           . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New inspection', 'N') . '</a>'
+         : '');
+diff --git a/inventory.php b/inventory.php
+index e70d0a0..60b1568 100644
+--- a/inventory.php
++++ b/inventory.php
+@@ -71,7 +71,7 @@ if (!$canViewItems && !$canViewBoms) {
+ // ============================================================
+ $itemActions = [
+     'items', 'item_new', 'item_edit', 'item_save', 'item_delete',
+-    'item_clone', 'item_toggle_active',
++    'item_clone', 'item_toggle_active', 'item_billing_push',
+     'item_import_preview', 'item_import_commit',
+ ];
+ $txnActions = [
+@@ -84,6 +84,7 @@ $bomLineActions = [
+     'bom_import_preview', 'bom_import_commit',
+     'bom_old_import', 'bom_old_import_commit', 'bom_old_import_commit_batch',
+     'bom_delete_preview', 'bom_delete_commit',
++    'receipt_verify_preview', 'receipt_verify_commit',
+ ];
+ $bomViewActions = [
+     'boms', 'bom_view', 'bom_edit', 'bom_grid',
+diff --git a/inventory_shiprcpt.php b/inventory_shiprcpt.php
+index 8a13241..7eb7c78 100644
+--- a/inventory_shiprcpt.php
++++ b/inventory_shiprcpt.php
+@@ -817,6 +817,9 @@ if ($action === 'bom_for_receive_item') {
+     $stockByItem = [];
+     if (!empty($childIds)) {
+         $placeholders = implode(',', array_fill(0, count($childIds), '?'));
++        // Held locations (LOC-LIP / LOC-SMP) are excluded — their stock is
++        // tracked but can never be shipped, only added to or moved.
++        $heldInList = inv_held_location_codes_sql();
+         $stockRows = db_all(
+             "SELECT s.item_id, s.location_id, s.qty, l.name AS loc_name, l.code AS loc_code
+                FROM inv_item_location_stock s
+@@ -824,6 +827,7 @@ if ($action === 'bom_for_receive_item') {
+               WHERE s.item_id IN ($placeholders)
+                 AND s.qty > 0
+                 AND l.is_active = 1
++                AND l.code COLLATE utf8mb4_unicode_ci NOT IN ($heldInList)
+               ORDER BY s.qty DESC, l.name",
+             $childIds
+         );
+@@ -877,12 +881,16 @@ if ($action === 'stock_by_location') {
+         echo json_encode(['ok' => false, 'reason' => 'Missing item_id']);
+         exit;
+     }
++    // Held locations (LOC-LIP / LOC-SMP) are excluded — their stock can
++    // never be shipped, only added to or moved.
++    $heldInList = inv_held_location_codes_sql();
+     $rows = db_all(
+-        'SELECT l.id, l.name, l.code, s.qty
++        "SELECT l.id, l.name, l.code, s.qty
+            FROM inv_item_location_stock s
+            JOIN locations l ON l.id = s.location_id
+           WHERE s.item_id = ? AND s.qty > 0 AND l.is_active = 1
+-          ORDER BY s.qty DESC, l.name',
++            AND l.code COLLATE utf8mb4_unicode_ci NOT IN ($heldInList)
++          ORDER BY s.qty DESC, l.name",
+         [$itemId]
+     );
+     echo json_encode([
+@@ -1251,6 +1259,18 @@ if ($action === 'save') {
+         // Step 1 — validate + build a $specs list. Same gates as
+         // before; bad rows still bail out via redirect.
+         // ------------------------------------------------------------
++        // Held locations (LOC-LIP / LOC-SMP) can never be a ship source —
++        // their stock is add/move only. Resolve their ids once for the
++        // per-line guard below (the Source picker already omits them; this
++        // defends against a hand-crafted POST).
++        $heldLocIds = [];
++        $heldInList = inv_held_location_codes_sql();
++        foreach (db_all(
++            "SELECT id FROM locations WHERE code COLLATE utf8mb4_unicode_ci IN ($heldInList)"
++        ) as $hr) {
++            $heldLocIds[(int)$hr['id']] = true;
++        }
++
+         $specs = [];
+         for ($i = 0; $i < $n; $i++) {
+             $lid    = isset($lineIds[$i]) ? (int)$lineIds[$i] : 0;
+@@ -1288,6 +1308,12 @@ if ($action === 'save') {
+                 flash_set('error', 'Each ship line for an inventory item needs a source location.');
+                 redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+             }
++            if ($kind === 'ship' && $entity === 'inv_item' && $itemId > 0 && isset($heldLocIds[$srcId])) {
++                db()->rollBack();
++                flash_set('error', 'Held stock (Lost In Process / Sample) cannot be shipped. '
++                    . 'Move it to an available location first.');
++                redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
++            }
+             if ($kind === 'ship' && $entity === 'inv_item' && $itemId > 0) {
+                 try {
+                     $stockRow = db_one(
+diff --git a/invoice.php b/invoice.php
+index 4a03a5c..7af3a5d 100644
+--- a/invoice.php
++++ b/invoice.php
+@@ -2400,8 +2400,11 @@ $listActions = '';
+ if ($canManage) {
+     $listActions .= '<a class="btn btn-primary" href="' . h(url('/invoice.php?action=new')) . '"'
+                   . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New invoice', 'N') . '</a> ';
+-    $listActions .= '<a class="btn btn-ghost" href="' . h(url('/invoice.php?action=import')) . '">'
+-                  . '⬇ Import from Old Inventory</a>';
++    // Old-inventory import is admin-only and lives under Admin ▸ Old Inventory Import.
++    if (is_admin()) {
++        $listActions .= '<a class="btn btn-ghost" href="' . h(url('/invoice.php?action=import')) . '">'
++                      . '⬇ Import from Old Inventory</a>';
++    }
+ }
+ $dtCfg['title']        = 'Invoices';
+ $dtCfg['description']  = 'One row per invoice line item. Each line tracks how much of its qty is linked to receipts / asset transactions. The Link column opens the per-line linker.';
+diff --git a/old_inventory_admin.php b/old_inventory_admin.php
+new file mode 100644
+index 0000000..929b5f5
+--- /dev/null
++++ b/old_inventory_admin.php
+@@ -0,0 +1,145 @@
++<?php
++/**
++ * MagDyn — Admin ▸ Old Inventory Import
++ * Created: 20260616_130000_IST
++ *
++ * Central admin hub that gathers every "Import from Old Inventory" flow (and
++ * its matching delete / reset controls) into one place under the Admin tab.
++ *
++ * Each card links to the existing per-module import page, where the Import
++ * buttons and the Delete / Reset buttons already live together — this page is
++ * purely a launcher, it does not duplicate those flows.
++ *
++ * Visibility: registered as the `old_inventory_admin` module and granted only
++ * to the admin role (see sql/migration_20260616_130000_IST.sql), so it appears
++ * under Admin for administrators only. The scattered per-page import buttons
++ * are likewise gated by is_admin() and now point users here.
++ *
++ * Permissions: old_inventory_admin.view
++ */
++require_once __DIR__ . '/includes/bootstrap.php';
++require_login();
++require_permission('old_inventory_admin', 'view');
++
++$page_title  = 'Old Inventory Import';
++$page_module = 'old_inventory_admin';
++
++/**
++ * Import flows. Each entry: [icon, title, href, what-it-covers, reset-note].
++ */
++$cards = [
++    [
++        'icon'  => '📦',
++        'title' => 'Assets, Vendors &amp; Users',
++        'href'  => url('/old_inventory_import.php'),
++        'desc'  => 'Models, assets and transaction history, plus vendor companies '
++                 . '(contacts / addresses) and user accounts.',
++        'reset' => 'Delete All Asset Records · Delete All Vendors · Delete All Users',
++    ],
++    [
++        'icon'  => '🧬',
++        'title' => 'BOM / Inventory',
++        'href'  => url('/bom_old_import.php'),
++        'desc'  => 'Auto-fetch every BOM tree from <code>tree7-5.php</code> on the old '
++                 . 'server and import items, edges and transactions.',
++        'reset' => 'Delete All Inventory Records',
++    ],
++    [
++        'icon'  => '🧾',
++        'title' => 'Invoices',
++        'href'  => url('/invoice.php?action=import'),
++        'desc'  => 'Migrate <code>approveinv</code> (pending) and <code>recp_inv</code> '
++                 . '(approved) purchase invoices with their line items.',
++        'reset' => 'Delete All Invoices',
++    ],
++    [
++        'icon'  => '📐',
++        'title' => 'Inspection Templates',
++        'href'  => url('/inspection.php?action=import_old_templates'),
++        'desc'  => 'Import the legacy <code>inspection</code> table as reusable '
++                 . 'inspection templates.',
++        'reset' => 'Delete Imported Templates · Delete ALL Templates',
++    ],
++    [
++        'icon'  => '✅',
++        'title' => 'Inspection Records',
++        'href'  => url('/inspection.php?action=import_old_inspections'),
++        'desc'  => 'Import completed inspection records and their results from the '
++                 . 'old system.',
++        'reset' => 'Delete Imported Inspections · Delete ALL Inspections',
++    ],
++    [
++        'icon'  => '📝',
++        'title' => 'Running Notes',
++        'href'  => url('/running_notes.php?action=import'),
++        'desc'  => 'Import <code>inv_notes</code> and their attachment metadata, then '
++                 . 'download the physical attachment files.',
++        'reset' => 'Delete All Running Notes',
++    ],
++];
++
++/** Related read-only / post-import tools. */
++$related = [
++    [
++        'title' => 'Imported Data Viewer',
++        'href'  => url('/old_inv_data.php'),
++        'desc'  => 'Browse the raw data pulled in from the old inventory system.',
++    ],
++    [
++        'title' => 'Creator Backfill',
++        'href'  => url('/admin_user_backfill.php'),
++        'desc'  => 'Stamp the original created-by user onto already-imported records.',
++    ],
++];
++
++require __DIR__ . '/includes/header.php';
++?>
++<div class="form-page">
++    <?= form_toolbar([
++        'title'    => 'Old Inventory Import',
++        'subtitle' => 'Admin-only hub for migrating data from the legacy inventory_live system (192.168.1.249). '
++                    . 'Each card opens a page where the Import and Delete / Reset controls live together.',
++    ]) ?>
++
++    <div class="form-page-body" style="max-width:980px;">
++
++        <div class="alert alert-info" style="margin-bottom:24px;">
++            ⚠ These flows write to and can wipe live data. Run a delete / reset only when you
++            intend a clean re-import.
++        </div>
++
++        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
++            <?php foreach ($cards as $c): ?>
++            <div style="border:1px solid var(--border);border-radius:10px;padding:18px 20px;
++                        background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;
++                        flex-direction:column;gap:10px;">
++                <div style="display:flex;align-items:center;gap:10px;">
++                    <span style="font-size:24px;line-height:1;"><?= $c['icon'] ?></span>
++                    <h3 style="margin:0;font-size:16px;"><?= $c['title'] ?></h3>
++                </div>
++                <p class="muted small" style="margin:0;flex:1;"><?= $c['desc'] ?></p>
++                <div class="small" style="color:#7f1d1d;">
++                    <strong>Reset:</strong> <?= h($c['reset']) ?>
++                </div>
++                <div style="margin-top:4px;">
++                    <a class="btn btn-primary btn-sm" href="<?= h($c['href']) ?>">Open import &amp; reset →</a>
++                </div>
++            </div>
++            <?php endforeach; ?>
++        </div>
++
++        <h3 style="margin:32px 0 10px;">Related tools</h3>
++        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
++            <?php foreach ($related as $r): ?>
++            <div style="border:1px solid var(--border);border-radius:10px;padding:16px 18px;
++                        background:#fafafa;display:flex;flex-direction:column;gap:8px;">
++                <h3 style="margin:0;font-size:15px;"><?= h($r['title']) ?></h3>
++                <p class="muted small" style="margin:0;flex:1;"><?= h($r['desc']) ?></p>
++                <div><a class="btn btn-ghost btn-sm" href="<?= h($r['href']) ?>">Open →</a></div>
++            </div>
++            <?php endforeach; ?>
++        </div>
++
++    </div>
++</div>
++<?php require __DIR__ . '/includes/footer.php'; ?>
+diff --git a/roles.php b/roles.php
+index fe8300b..bc5c6e6 100644
+--- a/roles.php
++++ b/roles.php
+@@ -175,57 +175,182 @@ if ($action === 'new' || $action === 'edit') {
+                 <p class="muted small">Tick the permissions this role should grant. Use the column header to toggle a whole module.</p>
+ 
+                 <?php
+-                // Split the matrix: regular modules render in the main
+-                // table; note_cat_* modules go into a separate collapsible
+-                // section so the page stays clean as note categories grow.
+-                // Skip inactive note_cat_* modules — those correspond to
+-                // disabled categories and shouldn't be grant-able.
+-                $regularMods   = [];
++                // ----------------------------------------------------------
++                // Group the permission matrix to mirror the sidebar nav.
++                //
++                // Every permission card maps to a TOP-LEVEL nav group (Assets,
++                // Inventory, Reports, Admin, ...). Sub-modules that live under
++                // a group in the nav (View Assets, View Models, Asset
++                // Transactions, ...) render as labelled subsections inside
++                // their parent group's card instead of as loose cards.
++                //
++                // The hierarchy comes from modules.parent_id / is_group, the
++                // same columns visible_module_tree() uses for the sidebar — so
++                // the section titles match the nav tabs exactly.
++                //
++                // note_cat_* modules have no nav group; they stay in their own
++                // collapsible section below. Inactive ones are skipped.
++                // ----------------------------------------------------------
++                $byId          = [];
++                $childrenOf    = [];
+                 $noteCatMods   = [];
+                 foreach ($matrix as $m) {
++                    $byId[(int)$m['id']] = $m;
++                    if (!empty($m['parent_id'])) {
++                        $childrenOf[(int)$m['parent_id']][] = $m;
++                    }
++                }
++
++                // Flatten a module's descendants depth-first, preserving the
++                // matrix (sort_order) ordering. Sub-groups (e.g. Tools →
++                // Weight Calculator) are flattened in too.
++                $collectDesc = function ($pid) use (&$collectDesc, $childrenOf) {
++                    $out = [];
++                    foreach ($childrenOf[$pid] ?? [] as $c) {
++                        $out[] = $c;
++                        foreach ($collectDesc((int)$c['id']) as $d) { $out[] = $d; }
++                    }
++                    return $out;
++                };
++
++                // Top-level entries = modules with no parent. Render groups and
++                // standalone modules (Dashboard); peel note categories off.
++                $topRows = [];
++                foreach ($matrix as $m) {
++                    if (!empty($m['parent_id'])) continue;
+                     if (strpos($m['code'], 'note_cat_') === 0) {
+-                        if ((int)$m['is_active'] !== 1) continue;
+-                        $noteCatMods[] = $m;
+-                    } else {
+-                        $regularMods[] = $m;
++                        if ((int)$m['is_active'] === 1) $noteCatMods[] = $m;
++                        continue;
++                    }
++                    $topRows[] = $m;
++                }
++
++                // ---- Redundancy filters (keep the editor showing only the
++                //      permissions that actually DO something) ----
++                //
++                // 1) Nav-wrapper sub-modules: pure menu-link toggles whose
++                //    page is gated by a PARENT permission, not their own (the
++                //    destination page checks e.g. invoice.view, never
++                //    invoice_view.view). They now appear automatically via the
++                //    $navInherit map in visible_modules(), so granting them
++                //    here is redundant. Hide them.
++                $navWrapperCodes = [
++                    'asset_view_assets', 'asset_view_models', 'asset_transactions',
++                    'invoice_view', 'invoice_new',
++                    'insp_new', 'insp_completed', 'insp_templates',
++                    'tools_bubble', 'tools_cad', 'tools_weight', 'tools_calc',
++                    'inventory_shipments_list',
++                ];
++
++                // 2) Dead permissions: defined in the DB but never enforced by
++                //    any require_permission()/permission_check() call. The
++                //    "inventory"/"reports" GROUP rows are nav-only (their real
++                //    perms live on sub-modules), and tools.manage is unused.
++                $deadPerms = [
++                    'inventory.view', 'inventory.manage',
++                    'reports.view', 'reports.manage',
++                    'tools.manage',
++                    'manuals.view',        // manuals.php has no permission gate
++                    'job_card.close',      // never enforced (close is a workflow step, not a perm)
++                ];
++
++                // Drop dead permissions from a module's permission list.
++                $livePerms = function ($modCode, $perms) use ($deadPerms) {
++                    $out = [];
++                    foreach ($perms as $p) {
++                        if (in_array($modCode . '.' . $p['code'], $deadPerms, true)) continue;
++                        $out[] = $p;
++                    }
++                    return $out;
++                };
++
++                // Build a render model per top-level group:
++                //   selfPerms  — permissions on the group module itself
++                //   subs       — [['name'=>..., 'id'=>..., 'perms'=>[...]], ...]
++                //   total      — total permission count in the card
++                $cards = [];
++                foreach ($topRows as $g) {
++                    if ((int)$g['is_active'] !== 1) continue;   // skip disabled groups
++                    $selfPerms = $livePerms($g['code'], $g['permissions']);
++                    $subs  = [];
++                    $total = count($selfPerms);
++                    foreach ($collectDesc((int)$g['id']) as $child) {
++                        if ((int)$child['is_active'] !== 1) continue;          // skip disabled modules
++                        if (in_array($child['code'], $navWrapperCodes, true)) continue;  // nav-only wrapper
++                        $childPerms = $livePerms($child['code'], $child['permissions']);
++                        if (!$childPerms) continue;
++                        $subs[] = [
++                            'id'    => (int)$child['id'],
++                            'name'  => $child['name'],
++                            'perms' => $childPerms,
++                        ];
++                        $total += count($childPerms);
+                     }
++                    if ($total === 0) continue;   // nothing grantable — skip
++                    $cards[] = [
++                        'row'       => $g,
++                        'selfPerms' => $selfPerms,
++                        'subs'      => $subs,
++                        'total'     => $total,
++                    ];
+                 }
++
++                $permOption = function ($p, $modId, $grpId, &$tabIdx, $rolePerms, $showCode = true) {
++                    $checked = in_array($p['id'], $rolePerms) ? 'checked' : '';
++                    ob_start(); ?>
++                    <label class="perm-option">
++                        <input type="checkbox" name="perms[]" value="<?= (int)$p['id'] ?>"
++                               class="mod-<?= $modId ?> grp-<?= $grpId ?>"
++                               tabindex="<?= $tabIdx++ ?>" <?= $checked ?>>
++                        <span class="perm-option-text">
++                            <span class="perm-option-name"><?= h($p['name']) ?></span>
++                            <?php if ($showCode): ?><span class="perm-option-code"><?= h($p['code']) ?></span><?php endif; ?>
++                        </span>
++                    </label>
++                    <?php return ob_get_clean();
++                };
+                 ?>
+ 
+-                <table class="data-table perm-matrix" style="margin-top: 12px;">
+-                    <thead>
+-                    <tr>
+-                        <th>Module</th>
+-                        <th>Permissions</th>
+-                    </tr>
+-                    </thead>
+-                    <tbody>
+-                    <?php $tabIdx = 4; foreach ($regularMods as $m): ?>
+-                        <tr>
+-                            <th>
+-                                <label class="nowrap">
++                <div class="perm-modules">
++                    <?php $tabIdx = 4; foreach ($cards as $card):
++                        $g     = $card['row'];
++                        $grpId = (int)$g['id'];
++                    ?>
++                        <section class="perm-module">
++                            <div class="perm-module-head">
++                                <label class="perm-module-title nowrap">
+                                     <input type="checkbox" class="mod-toggle"
+-                                           data-target="mod-<?= (int)$m['id'] ?>"
++                                           data-target="grp-<?= $grpId ?>"
+                                            tabindex="<?= $tabIdx++ ?>">
+-                                    <?= h(module_icon($m['code'], $m['icon'])) ?> <?= h($m['name']) ?>
++                                    <span class="perm-module-icon"><?= h(module_icon($g['code'], $g['icon'])) ?></span>
++                                    <span><?= h($g['name']) ?></span>
+                                 </label>
+-                            </th>
+-                            <td style="text-align: left;">
+-                                <?php foreach ($m['permissions'] as $p): ?>
+-                                    <label class="nowrap" style="margin-right: 16px; font-weight: normal;">
+-                                        <input type="checkbox" name="perms[]" value="<?= (int)$p['id'] ?>"
+-                                               class="mod-<?= (int)$m['id'] ?>"
+-                                               tabindex="<?= $tabIdx++ ?>"
+-                                               <?= in_array($p['id'], $rolePerms) ? 'checked' : '' ?>>
+-                                        <?= h($p['name']) ?>
+-                                        <code class="muted"><?= h($p['code']) ?></code>
+-                                    </label>
++                                <span class="perm-module-count"><?= (int)$card['total'] ?></span>
++                            </div>
++                            <div class="perm-module-body">
++                                <?php // Group's own permissions (no sub-label).
++                                foreach ($card['selfPerms'] as $p) {
++                                    echo $permOption($p, $grpId, $grpId, $tabIdx, $rolePerms);
++                                } ?>
++
++                                <?php // Each sub-module as its own labelled block.
++                                foreach ($card['subs'] as $sub): ?>
++                                    <div class="perm-subgroup">
++                                        <label class="perm-subgroup-head nowrap">
++                                            <input type="checkbox" class="mod-toggle"
++                                                   data-target="mod-<?= $sub['id'] ?>"
++                                                   tabindex="<?= $tabIdx++ ?>">
++                                            <span><?= h($sub['name']) ?></span>
++                                        </label>
++                                        <?php foreach ($sub['perms'] as $p) {
++                                            echo $permOption($p, $sub['id'], $grpId, $tabIdx, $rolePerms);
++                                        } ?>
++                                    </div>
+                                 <?php endforeach; ?>
+-                            </td>
+-                        </tr>
++                            </div>
++                        </section>
+                     <?php endforeach; ?>
+-                    </tbody>
+-                </table>
++                </div>
+ 
+                 <?php if ($noteCatMods): ?>
+                     <details class="perm-matrix-group" style="margin-top: 16px;">
+@@ -235,44 +360,39 @@ if ($action === 'new' || $action === 'edit') {
+                                 (<?= count($noteCatMods) ?> categor<?= count($noteCatMods) === 1 ? 'y' : 'ies' ?> — controls who can view/post notes per category)
+                             </span>
+                         </summary>
+-                        <table class="data-table perm-matrix" style="margin-top: 8px;">
+-                            <thead>
+-                            <tr>
+-                                <th>Category</th>
+-                                <th>Permissions</th>
+-                            </tr>
+-                            </thead>
+-                            <tbody>
++                        <div class="perm-modules">
+                             <?php foreach ($noteCatMods as $m):
+                                 // Strip the "Note category: " prefix from the
+                                 // display since the section header already
+                                 // explains the context.
+                                 $displayName = preg_replace('/^Note category:\s*/', '', $m['name']);
+                             ?>
+-                                <tr>
+-                                    <th>
+-                                        <label class="nowrap">
++                                <section class="perm-module">
++                                    <div class="perm-module-head">
++                                        <label class="perm-module-title nowrap">
+                                             <input type="checkbox" class="mod-toggle"
+                                                    data-target="mod-<?= (int)$m['id'] ?>"
+                                                    tabindex="<?= $tabIdx++ ?>">
+-                                            <?= h($displayName) ?>
++                                            <span><?= h($displayName) ?></span>
+                                         </label>
+-                                    </th>
+-                                    <td style="text-align: left;">
++                                        <span class="perm-module-count"><?= count($m['permissions']) ?></span>
++                                    </div>
++                                    <div class="perm-module-body">
+                                         <?php foreach ($m['permissions'] as $p): ?>
+-                                            <label class="nowrap" style="margin-right: 16px; font-weight: normal;">
++                                            <label class="perm-option">
+                                                 <input type="checkbox" name="perms[]" value="<?= (int)$p['id'] ?>"
+                                                        class="mod-<?= (int)$m['id'] ?>"
+                                                        tabindex="<?= $tabIdx++ ?>"
+                                                        <?= in_array($p['id'], $rolePerms) ? 'checked' : '' ?>>
+-                                                <?= h(ucfirst($p['code'])) ?>
++                                                <span class="perm-option-text">
++                                                    <span class="perm-option-name"><?= h(ucfirst($p['code'])) ?></span>
++                                                </span>
+                                             </label>
+                                         <?php endforeach; ?>
+-                                    </td>
+-                                </tr>
++                                    </div>
++                                </section>
+                             <?php endforeach; ?>
+-                            </tbody>
+-                        </table>
++                        </div>
+                     </details>
+                 <?php endif; ?>
+             </div>
+@@ -280,16 +400,35 @@ if ($action === 'new' || $action === 'edit') {
+     </div>
+ 
+     <script>
+-    // Whole-module toggle (column header checkbox toggles every child checkbox)
+-    document.querySelectorAll('.mod-toggle').forEach(function (cb) {
+-        var children = document.querySelectorAll('.' + cb.getAttribute('data-target'));
+-        // Initialise: if all children are checked, check the master
+-        var allChecked = Array.prototype.every.call(children, function (c) { return c.checked; });
+-        cb.checked = allChecked && children.length > 0;
++    // Toggles work at two levels:
++    //   • group master  (data-target="grp-<id>")  → every checkbox in the card
++    //   • sub-module     (data-target="mod-<id>")  → that sub-module's boxes
++    // A master reflects its children: checked when all are on, indeterminate
++    // when only some are. Ticking any leaf refreshes every master above it.
++    var masters = Array.prototype.slice.call(document.querySelectorAll('.mod-toggle'));
++
++    function childrenOf(cb) {
++        return document.querySelectorAll('.' + cb.getAttribute('data-target'));
++    }
++    function refreshMasters() {
++        masters.forEach(function (cb) {
++            var children = childrenOf(cb);
++            var on = 0;
++            Array.prototype.forEach.call(children, function (c) { if (c.checked) on++; });
++            cb.checked = children.length > 0 && on === children.length;
++            cb.indeterminate = on > 0 && on < children.length;
++        });
++    }
++    masters.forEach(function (cb) {
+         cb.addEventListener('change', function () {
+-            children.forEach(function (c) { c.checked = cb.checked; });
++            Array.prototype.forEach.call(childrenOf(cb), function (c) { c.checked = cb.checked; });
++            refreshMasters();
+         });
+     });
++    document.querySelectorAll('input[name="perms[]"]').forEach(function (c) {
++        c.addEventListener('change', refreshMasters);
++    });
++    refreshMasters();
+     </script>
+     <?php require __DIR__ . '/includes/footer.php';
+     exit;
+diff --git a/running_notes.php b/running_notes.php
+index 8b6b81c..7bc9b81 100644
+--- a/running_notes.php
++++ b/running_notes.php
+@@ -102,9 +102,81 @@ function running_notes_render_import_result(array $result, ?string $fatalError):
+             <?php endif; ?>
+ 
+             <div class="alert alert-info" style="margin-top:20px;">
+-                Attachment <em>metadata</em> was imported. Copy the physical files into
+-                <code>uploads/notes/old_import/</code> (named by their old <code>tmp_name</code> hash)
+-                so the 📎 download links resolve.
++                Attachment <em>metadata</em> was imported. Now run
++                <strong>Step 2 — Download Attachment Files</strong> on the import page to fetch the
++                physical files from the old server so the 📎 download links resolve.
++            </div>
++        <?php endif; ?>
++
++            <div style="margin-top:24px;display:flex;gap:10px;">
++                <a class="btn btn-primary" href="<?= h(url('/running_notes.php?action=list')) ?>">View Running Notes</a>
++                <a class="btn btn-ghost"   href="<?= h(url('/running_notes.php?action=import')) ?>">Back to Import</a>
++            </div>
++        </div>
++    </div>
++    <?php
++    require __DIR__ . '/includes/footer.php';
++}
++
++/**
++ * Render the "download attachment files" result page (stat cards + log).
++ * Shown after a POST to ?action=import_attachments.
++ */
++function running_notes_render_attach_result(array $result, ?string $fatalError): void
++{
++    $page_title  = 'Download Attachment Files — Results';
++    $page_module = 'running_notes';
++    require __DIR__ . '/includes/header.php';
++    ?>
++    <div class="form-page">
++        <?= form_toolbar([
++            'title'      => 'Download Attachment Files — Results',
++            'back_href'  => url('/running_notes.php?action=import'),
++            'back_label' => 'Back to Import',
++        ]) ?>
++        <div class="form-page-body" style="max-width:820px;">
++        <?php if ($fatalError): ?>
++            <div class="alert alert-error">
++                <strong>Download failed with a fatal error:</strong><br>
++                <code><?= h($fatalError) ?></code>
++            </div>
++        <?php else: ?>
++            <h3 style="margin:0 0 8px;">Attachment Files</h3>
++            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:24px;">
++                <?php foreach ([
++                    ['Files referenced',  $result['att_total']  ?? 0, '#f3f4f6', '#374151'],
++                    ['Downloaded',        $result['downloaded'] ?? 0, '#d1fae5', '#065f46'],
++                    ['Already present',   $result['already']    ?? 0, '#dbeafe', '#1e40af'],
++                    ['Missing on source', $result['missing']    ?? 0, '#fef9c3', '#854d0e'],
++                    ['Failed',            $result['failed']     ?? 0, '#fee2e2', '#991b1b'],
++                ] as [$label, $val, $bg, $color]): ?>
++                <div style="background:<?= $bg ?>;color:<?= $color ?>;border-radius:8px;
++                            padding:14px 24px;min-width:130px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.06);">
++                    <div style="font-size:30px;font-weight:700;line-height:1.1;"><?= number_format((int)$val) ?></div>
++                    <div style="font-size:12px;margin-top:4px;"><?= h($label) ?></div>
++                </div>
++                <?php endforeach; ?>
++            </div>
++
++            <?php if (!empty($result['errors'])): ?>
++            <h3 style="margin-bottom:8px;">Download Log</h3>
++            <div style="background:#f9fafb;border:1px solid var(--border);border-radius:6px;
++                        max-height:360px;overflow-y:auto;padding:12px;
++                        font-size:12px;font-family:monospace;line-height:1.6;">
++                <?php foreach ($result['errors'] as $entry): ?>
++                <?php $c = $entry['level'] === 'error' ? '#991b1b' : ($entry['level'] === 'warn' ? '#854d0e' : '#374151'); ?>
++                <div style="color:<?= $c ?>;margin-bottom:2px;">
++                    [<?= h($entry['time']) ?>]
++                    [<?= strtoupper(h($entry['level'])) ?>]
++                    <?= h(is_array($entry['message']) ? json_encode($entry['message']) : $entry['message']) ?>
++                </div>
++                <?php endforeach; ?>
++            </div>
++            <?php endif; ?>
++
++            <div class="alert alert-info" style="margin-top:20px;">
++                The 📎 download links on imported notes now resolve to the files fetched here.
++                You can re-run this safely — files already on disk are skipped.
+             </div>
+         <?php endif; ?>
+ 
+@@ -162,6 +234,19 @@ if (notes_handle_action()) {
+ // list's view gate below.
+ // =================================================================
+ 
++// ── GET: render the stashed attachment-download result (streaming redirect) ──
++if ($_SERVER['REQUEST_METHOD'] === 'GET' && (string)input('result') === 'attachments') {
++    require_permission('running_notes', 'manage');
++    $stash = $_SESSION['imp_result_note_atts'] ?? null;
++    unset($_SESSION['imp_result_note_atts']);
++    if (!$stash) {
++        // Nothing stashed (e.g. page refreshed) — go back to the import page.
++        redirect(url('/running_notes.php?action=import'));
++    }
++    running_notes_render_attach_result($stash['result'] ?? [], $stash['fatal'] ?? null);
++    exit;
++}
++
+ // ── POST: delete ALL running notes (every module) ───────────────────────────
+ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'delete_all_notes') {
+     csrf_check();
+@@ -202,6 +287,82 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import
+     exit;
+ }
+ 
++// ── POST: download attachment files from the old server ──────────────────────
++// Fetches the physical files for every imported note attachment straight from
++// api_export_notes.php and drops them into uploads/notes/old_import/ so the
++// 📎 download links resolve. Idempotent — already-downloaded files are skipped.
++if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import_attachments') {
++    csrf_check();
++    require_permission('running_notes', 'manage');
++    @set_time_limit(0);
++    @ignore_user_abort(true);
++
++    require_once __DIR__ . '/services/OldInventoryNoteAttachmentsImportService.php';
++
++    // Optional cap: download only the first N files (a test run). 0/blank = all.
++    $limit = max(0, (int) input('limit', 0));
++
++    // The download runs the same way regardless of transport; only how we report
++    // progress differs (streamed NDJSON for the live bar vs a plain result page).
++    $runner = function (callable $emit) use ($limit) {
++        $fatalError = null;
++        $result     = [];
++        try {
++            $svc = new OldInventoryNoteAttachmentsImportService((int) current_user_id());
++            $svc->setProgressCallback($emit);
++            $svc->setLimit($limit);
++            $result = $svc->run();
++        } catch (Throwable $e) {
++            $fatalError = $e->getMessage();
++        }
++        return [$result, $fatalError];
++    };
++
++    // ── Streaming path (progressive enhancement): emit NDJSON progress events
++    //    so the browser can draw a live bar. Flushing each event also keeps the
++    //    connection active, so a multi-minute download never hits an idle timeout.
++    if ((string) input('stream') === '1') {
++        @ini_set('zlib.output_compression', '0');
++        @ini_set('output_buffering', '0');
++        if (function_exists('apache_setenv')) {
++            @apache_setenv('no-gzip', '1');
++            @apache_setenv('dont-vary', '1');
++        }
++        while (ob_get_level() > 0) { @ob_end_flush(); }
++        header('Content-Type: application/x-ndjson; charset=utf-8');
++        header('Content-Encoding: none');
++        header('Cache-Control: no-cache, no-store');
++        header('X-Accel-Buffering: no');
++
++        $send = function (array $msg) {
++            echo json_encode($msg) . "\n";
++            @ob_flush();
++            @flush();
++        };
++        $emit = function (string $phase, int $done, int $total) use ($send) {
++            $pct = $total > 0 ? (int) floor($done * 100 / $total) : 100;
++            $send(['type' => 'progress', 'phase' => $phase, 'done' => $done, 'total' => $total, 'percent' => $pct]);
++        };
++
++        $send(['type' => 'start']);
++        [$result, $fatalError] = $runner($emit);
++
++        // Stash the result for the redirect GET, then release the session lock
++        // before telling the browser to navigate (so the result page isn't blocked).
++        $_SESSION['imp_result_note_atts'] = ['result' => $result, 'fatal' => $fatalError];
++        if (session_status() === PHP_SESSION_ACTIVE) {
++            session_write_close();
++        }
++        $send(['type' => 'done', 'redirect' => url('/running_notes.php?result=attachments'), 'fatal' => $fatalError]);
++        exit;
++    }
++
++    // ── No-JS fallback: run synchronously and render the result page directly.
++    [$result, $fatalError] = $runner(function () {});
++    running_notes_render_attach_result($result, $fatalError);
++    exit;
++}
++
+ // ── GET: import confirmation / status page ───────────────────────────────────
+ if ($action === 'import') {
+     require_permission('running_notes', 'manage');
+@@ -210,10 +371,16 @@ if ($action === 'import') {
+     // renders the page (delete-all works without it).
+     $apiError    = null;
+     $sourceCount = 0;
++    $sourceAtts  = null;   // null = couldn't fetch (older API without the endpoint)
+     try {
+         require_once __DIR__ . '/includes/old_inventory_api.php';
+         old_inventory_notes_api('ping');
+         $sourceCount = (int) (old_inventory_notes_api('notes_count')['count'] ?? 0);
++        try {
++            $sourceAtts = (int) (old_inventory_notes_api('attachments_count')['count'] ?? 0);
++        } catch (Throwable $e) {
++            $sourceAtts = null;   // endpoint not deployed yet — non-fatal
++        }
+     } catch (Throwable $e) {
+         $apiError = $e->getMessage();
+     }
+@@ -221,6 +388,13 @@ if ($action === 'import') {
+     $localNotes = (int) db_val('SELECT COUNT(*) FROM notes', [], 0);
+     $localAtts  = (int) db_val('SELECT COUNT(*) FROM note_attachments', [], 0);
+ 
++    // Source URL shown under the Step 2 button (best-effort).
++    $notesUrl = '';
++    try {
++        $cfg      = require __DIR__ . '/config/old_inventory_api.php';
++        $notesUrl = (string) ($cfg['notes_url'] ?? '');
++    } catch (Throwable $e) { /* leave blank */ }
++
+     $page_title  = 'Import Running Notes';
+     $page_module = 'running_notes';
+     require __DIR__ . '/includes/header.php';
+@@ -234,6 +408,21 @@ if ($action === 'import') {
+         ]) ?>
+         <div class="form-page-body" style="max-width:720px;">
+ 
++            <!-- Live progress panel (revealed by JS while the attachment download streams) -->
++            <div id="import-progress" style="display:none;background:#f8fafc;border:1px solid var(--border);
++                 border-radius:10px;padding:18px 20px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,.06);">
++                <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;">
++                    <h3 id="ip-title" style="margin:0;">Downloading…</h3>
++                    <span id="ip-pct" style="font-weight:700;font-variant-numeric:tabular-nums;">0%</span>
++                </div>
++                <div id="ip-phase" class="muted small" style="margin:6px 0 10px;">Starting…</div>
++                <div style="background:#e5e7eb;border-radius:999px;height:16px;overflow:hidden;">
++                    <div id="ip-bar" style="background:#2563eb;height:100%;width:0%;border-radius:999px;
++                         transition:width .25s ease;"></div>
++                </div>
++                <div class="muted small" style="margin-top:8px;">Please keep this page open until the download finishes.</div>
++            </div>
++
+             <?php if ($apiError): ?>
+             <div class="alert alert-error" style="margin-bottom:20px;">
+                 <strong>Cannot reach the running-notes API.</strong><br>
+@@ -265,7 +454,7 @@ if ($action === 'import') {
+                     </tr>
+                     <tr>
+                         <td>Attachments</td>
+-                        <td style="text-align:right;font-weight:600;">—</td>
++                        <td style="text-align:right;font-weight:600;"><?= $sourceAtts === null ? '—' : number_format($sourceAtts) ?></td>
+                         <td style="text-align:right;"><?= number_format($localAtts) ?></td>
+                     </tr>
+                 </tbody>
+@@ -277,7 +466,7 @@ if ($action === 'import') {
+                 <tr><th>Class <code>P</code></th><td>Linked to the <strong>inventory item</strong> whose <em>Inventory Code</em> (<code>code</code>) equals the old <code>inv_notes.id</code>.</td></tr>
+                 <tr><th>With a <code>tid</code></th><td>Linked to the specific <strong>inventory transaction</strong> (matched via <code>OLD-ITX-&lt;tid&gt;</code>). Falls back to the class entity if the txn isn't found.</td></tr>
+                 <tr><th>Note type</th><td>Taken from the old <code>priority</code> column (e.g. <em>Dimension</em>, <em>General</em>) and shown in the <strong>Category</strong> column. New categories are <strong>created automatically</strong> if they don't exist yet.</td></tr>
+-                <tr><th>Attachments</th><td>Metadata only. <code>stored_path = old_import/&lt;tmp_name&gt;</code> — copy the physical files into <code>uploads/notes/old_import/</code> separately.</td></tr>
++                <tr><th>Attachments</th><td>This step imports attachment <strong>metadata</strong> only. Run <strong>Step 2 — Download Attachment Files</strong> below to fetch the physical files from the old server.</td></tr>
+                 <tr><th>Author / date</th><td>Authored by you; original <code>created_date</code> preserved.</td></tr>
+             </table>
+ 
+@@ -308,8 +497,8 @@ if ($action === 'import') {
+             </div>
+ 
+             <?php if (!$apiError): ?>
+-            <!-- Run import -->
+-            <h3 style="margin:0 0 10px;">Run Import</h3>
++            <!-- Step 1 — import note rows + attachment metadata via API -->
++            <h3 style="margin:0 0 10px;">Step 1 — Import Notes (via API)</h3>
+             <form method="post" action="<?= h(url('/running_notes.php')) ?>"
+                   onsubmit="return confirm('Import all running notes from the old system?\n\nRun \'Delete All Running Notes\' first if you want a clean re-import.');">
+                 <?= csrf_field() ?>
+@@ -320,10 +509,157 @@ if ($action === 'import') {
+                     <span class="muted small">This may take up to a minute.</span>
+                 </div>
+             </form>
++
++            <!-- Step 2 — download the physical attachment files from the old server -->
++            <h3 style="margin:28px 0 10px;">Step 2 — Download Attachment Files</h3>
++            <p class="muted small" style="margin:0 0 12px;">
++                Fetches the physical files for the <strong><?= number_format($localAtts) ?></strong>
++                imported attachment<?= $localAtts === 1 ? '' : 's' ?> straight from the old server
++                (<code>api_export_notes.php</code>) into <code>uploads/notes/old_import/</code>, so the
++                📎 download links resolve. Run <strong>Step 1</strong> first.
++                This step is <strong>idempotent</strong> — files already downloaded are skipped, so it is
++                safe to re-run if it is interrupted. With <?= number_format($localAtts) ?> files this can
++                take several minutes; keep this tab open until it finishes.
++            </p>
++            <form method="post" action="<?= h(url('/running_notes.php')) ?>"
++                  class="js-stream-import" data-title="Downloading attachment files"
++                  data-confirm="Download all attachment files from the old server?&#10;&#10;Import the notes (Step 1) first.">
++                <?= csrf_field() ?>
++                <input type="hidden" name="action" value="import_attachments">
++                <div style="display:flex;gap:10px;align-items:center;">
++                    <button type="submit" class="btn btn-primary" <?= $localAtts === 0 ? 'disabled title="No imported attachments yet — run Step 1 first."' : '' ?>>
++                        ⬇ Download All Attachment Files
++                    </button>
++                    <span class="muted small">Downloads from <?= h($notesUrl) ?></span>
++                </div>
++            </form>
++
++            <!-- Test run: download only the first N files -->
++            <form method="post" action="<?= h(url('/running_notes.php')) ?>"
++                  class="js-stream-import" data-title="Downloading attachment files"
++                  style="margin-top:12px;">
++                <?= csrf_field() ?>
++                <input type="hidden" name="action" value="import_attachments">
++                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
++                    <label class="muted small" for="limit_n">Download only the first</label>
++                    <input type="number" id="limit_n" name="limit" min="1" max="<?= (int)$localAtts ?>"
++                           value="10" style="width:90px;" required
++                           <?= $localAtts === 0 ? 'disabled' : '' ?>>
++                    <label class="muted small" for="limit_n">files (a quick test run)</label>
++                    <button type="submit" class="btn btn-ghost" <?= $localAtts === 0 ? 'disabled title="No imported attachments yet — run Step 1 first."' : '' ?>>
++                        ⬇ Download N
++                    </button>
++                </div>
++            </form>
+             <?php endif; ?>
+ 
+         </div>
+     </div>
++
++    <script>
++    // Progressive enhancement: stream the attachment download into the panel above.
++    // The Step 2 form (.js-stream-import) POSTs with stream=1 and draws a live bar
++    // from the NDJSON the server emits. Without JS it submits normally and falls
++    // back to the synchronous "run then show results" page.
++    (function () {
++        var panel = document.getElementById('import-progress');
++        if (!panel || !window.fetch || !window.ReadableStream) return;
++
++        var bar   = document.getElementById('ip-bar');
++        var pct   = document.getElementById('ip-pct');
++        var phase = document.getElementById('ip-phase');
++        var title = document.getElementById('ip-title');
++
++        function show(t) {
++            title.textContent = t;
++            phase.textContent = 'Starting…';
++            bar.style.width = '0%';
++            bar.style.background = '#2563eb';
++            pct.textContent = '0%';
++            panel.style.display = 'block';
++            panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
++        }
++        function num(n) { try { return Number(n).toLocaleString(); } catch (e) { return n; } }
++        function setProgress(ph, done, total, percent) {
++            phase.textContent = ph + ' — ' + num(done) + ' / ' + num(total);
++            bar.style.width = percent + '%';
++            pct.textContent = percent + '%';
++        }
++        function fail(msg) {
++            bar.style.background = '#dc2626';
++            phase.textContent = 'Download failed: ' + msg;
++        }
++
++        function handleLine(line) {
++            var msg;
++            try { msg = JSON.parse(line); } catch (e) { return; }
++            if (msg.type === 'progress') {
++                setProgress(msg.phase, msg.done, msg.total, msg.percent);
++            } else if (msg.type === 'done') {
++                if (msg.fatal) { fail(msg.fatal); return; }
++                phase.textContent = 'Finishing…';
++                bar.style.width = '100%';
++                pct.textContent = '100%';
++                window.location = msg.redirect;
++            }
++        }
++
++        Array.prototype.forEach.call(document.querySelectorAll('form.js-stream-import'), function (form) {
++            form.addEventListener('submit', function (ev) {
++                ev.preventDefault();
++
++                var confirmMsg = form.getAttribute('data-confirm');
++                if (confirmMsg && !window.confirm(confirmMsg)) return;
++
++                Array.prototype.forEach.call(form.querySelectorAll('button[type=submit]'), function (b) {
++                    b.disabled = true;
++                });
++                show(form.getAttribute('data-title') || 'Downloading…');
++
++                var fd = new FormData(form);
++                fd.set('stream', '1');
++
++                // Use getAttribute('action'), NOT form.action — the hidden
++                // <input name="action"> shadows the form's .action property.
++                var actionUrl = form.getAttribute('action');
++
++                fetch(actionUrl, {
++                    method: 'POST',
++                    body: fd,
++                    headers: { 'X-Requested-With': 'fetch' },
++                    credentials: 'same-origin'
++                }).then(function (resp) {
++                    if (!resp.ok || !resp.body) { throw new Error('HTTP ' + resp.status); }
++                    var reader = resp.body.getReader();
++                    var dec = new TextDecoder();
++                    var buf = '';
++                    function pump() {
++                        return reader.read().then(function (r) {
++                            if (r.done) {
++                                if (buf.trim() !== '') handleLine(buf.trim());
++                                return;
++                            }
++                            buf += dec.decode(r.value, { stream: true });
++                            var idx;
++                            while ((idx = buf.indexOf('\n')) >= 0) {
++                                var line = buf.slice(0, idx);
++                                buf = buf.slice(idx + 1);
++                                if (line.trim() !== '') handleLine(line);
++                            }
++                            return pump();
++                        });
++                    }
++                    return pump();
++                }).catch(function (err) {
++                    fail(String(err && err.message ? err.message : err));
++                    Array.prototype.forEach.call(form.querySelectorAll('button[type=submit]'), function (b) {
++                        b.disabled = false;
++                    });
++                });
++            });
++        });
++    })();
++    </script>
+     <?php
+     require __DIR__ . '/includes/footer.php';
+     exit;
+@@ -1098,7 +1434,8 @@ if (permission_check('running_notes', 'create')) {
+     $listActions .= '<a class="btn btn-primary btn-sm" href="' . h(url('/running_notes.php?action=new')) . '"'
+         . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ Add note', 'N') . '</a> ';
+ }
+-if (permission_check('running_notes', 'manage')) {
++// Old-inventory import is admin-only and lives under Admin ▸ Old Inventory Import.
++if (is_admin()) {
+     $listActions .= '<a class="btn btn-ghost btn-sm" href="' . h(url('/running_notes.php?action=import')) . '">'
+         . '⬇ Import from Old Inventory</a>';
+ }
+diff --git a/services/OldInventoryNoteAttachmentsImportService.php b/services/OldInventoryNoteAttachmentsImportService.php
+new file mode 100644
+index 0000000..41ca1dc
+--- /dev/null
++++ b/services/OldInventoryNoteAttachmentsImportService.php
+@@ -0,0 +1,224 @@
++<?php
++/**
++ * MagDyn — Old Inventory Note-Attachment File Import Service (API version)
++ *
++ * Companion to OldInventoryNotesImportService. That importer brings over the
++ * note rows and the attachment *metadata* (stored_path = "old_import/<tmp_name>")
++ * but NOT the physical files. This service fills in the files by downloading
++ * them straight from the old server over HTTP — no manual copying, no zip
++ * upload required.
++ *
++ * How it works:
++ *   1. Find every note_attachments row whose stored_path lives under
++ *      "old_import/" (i.e. was created by the notes importer).
++ *   2. Group them by tmp_name (the basename of stored_path) so each distinct
++ *      physical file is fetched only once, even when several notes share it.
++ *   3. For each file, call api_export_notes.php?action=attachment_file&tmp=...
++ *      on the old server. The old server locates the file on disk by its
++ *      original filename and streams it back; we write it to
++ *      uploads/notes/old_import/<tmp_name>, exactly where note_attach.php
++ *      expects it.
++ *   4. Record the real byte size back onto the matching attachment rows.
++ *
++ * The run is idempotent and resumable: files already present on disk are
++ * skipped, so re-running after a timeout simply continues where it left off.
++ *
++ * Usage:
++ *   require_once __DIR__ . '/../services/OldInventoryNoteAttachmentsImportService.php';
++ *   $svc    = new OldInventoryNoteAttachmentsImportService(current_user_id());
++ *   $result = $svc->run();
++ */
++
++require_once __DIR__ . '/../includes/old_inventory_api.php';
++
++class OldInventoryNoteAttachmentsImportService
++{
++    /** Sub-directory (under uploads/notes/) imported attachments live in. */
++    private const IMPORT_SUBDIR = 'old_import';
++
++    /** @var int  User on whose behalf the import runs (for logging only). */
++    private int $actorId;
++
++    /** @var int  Max number of files to process this run; 0 = all (no limit). */
++    private int $limit = 0;
++
++    /** @var callable|null  fn(string $phase, int $done, int $total) */
++    private $onProgress = null;
++
++    /** @var array  Accumulated log entries */
++    private array $errors = [];
++
++    /** @var array */
++    private array $counts = [
++        'att_total'  => 0,   // distinct physical files referenced by imported notes
++        'downloaded' => 0,   // fetched from the old server this run
++        'already'    => 0,   // already present on disk (skipped)
++        'missing'    => 0,   // old server has no file on disk (404)
++        'failed'     => 0,   // network / write error
++        'bytes'      => 0,   // total bytes downloaded
++    ];
++
++    public function __construct(int $actorUserId)
++    {
++        $this->actorId = $actorUserId;
++    }
++
++    public function setProgressCallback(callable $cb): void
++    {
++        $this->onProgress = $cb;
++    }
++
++    /** Cap the run to the first N distinct files (0 = no limit). Handy for a test run. */
++    public function setLimit(int $n): void
++    {
++        $this->limit = max(0, $n);
++    }
++
++    private function emitProgress(string $phase, int $done, int $total): void
++    {
++        if ($this->onProgress) {
++            ($this->onProgress)($phase, $done, $total);
++        }
++    }
++
++    public function run(): array
++    {
++        $dir = $this->ensureImportDir();
++
++        // Every attachment the notes importer created points at old_import/<tmp_name>.
++        $rows = db_all(
++            "SELECT id, stored_path, filename
++               FROM note_attachments
++              WHERE stored_path LIKE 'old_import/%'
++              ORDER BY id"
++        );
++
++        // Group by tmp_name so each physical file is downloaded just once.
++        $groups = [];   // tmp_name => ['filename' => string, 'ids' => int[]]
++        foreach ($rows as $r) {
++            $tmp = basename((string) $r['stored_path']);
++            if ($tmp === '') {
++                continue;
++            }
++            if (!isset($groups[$tmp])) {
++                $groups[$tmp] = ['filename' => (string) $r['filename'], 'ids' => []];
++            }
++            $groups[$tmp]['ids'][] = (int) $r['id'];
++        }
++
++        $available = count($groups);
++        if ($this->limit > 0 && $available > $this->limit) {
++            $groups = array_slice($groups, 0, $this->limit, true);
++            $this->log("Limited to the first {$this->limit} of {$available} files (test run).", 'warn');
++        }
++
++        $total = count($groups);
++        $this->counts['att_total'] = $total;
++        $this->log("Found {$available} distinct attachment files referenced by imported notes (" . count($rows) . " rows); processing {$total}.");
++        $this->emitProgress('Attachments', 0, $total);
++
++        if ($total === 0) {
++            $this->log('Nothing to do — import the notes first (Running Notes → Import).', 'warn');
++            return array_merge($this->counts, ['errors' => $this->errors]);
++        }
++
++        $done = 0;
++        foreach ($groups as $tmp => $g) {
++            try {
++                $this->processOne($dir, (string) $tmp, $g);
++            } catch (Throwable $e) {
++                $this->counts['failed']++;
++                $this->log("Attachment '{$g['filename']}' ({$tmp}): " . $e->getMessage(), 'error');
++            }
++            $done++;
++            // Emit on every file: the streaming endpoint turns each event into a
++            // flushed NDJSON line, which both drives the progress bar and keeps the
++            // HTTP connection active so long downloads never hit an idle timeout.
++            $this->emitProgress('Attachments', $done, $total);
++        }
++        $this->emitProgress('Attachments', $total, $total);
++
++        $mb = number_format($this->counts['bytes'] / 1048576, 1);
++        $this->log(
++            "Done — downloaded: {$this->counts['downloaded']} ({$mb} MB), " .
++            "already present: {$this->counts['already']}, " .
++            "missing on source: {$this->counts['missing']}, " .
++            "failed: {$this->counts['failed']}."
++        );
++
++        return array_merge($this->counts, ['errors' => $this->errors]);
++    }
++
++    /** Fetch (or skip) one physical file and sync its size onto the DB rows. */
++    private function processOne(string $dir, string $tmp, array $g): void
++    {
++        $target = $dir . '/' . $tmp;
++
++        // Already on disk from a previous run → just make sure size is recorded.
++        if (is_file($target) && filesize($target) > 0) {
++            $this->counts['already']++;
++            $this->syncSize($g['ids'], (int) filesize($target));
++            return;
++        }
++
++        $partFile = $target . '.part';
++        $res = old_inventory_notes_api_download(
++            ['action' => 'attachment_file', 'tmp' => $tmp],
++            $partFile
++        );
++
++        if (empty($res['ok'])) {
++            @unlink($partFile);
++            $status = (int) ($res['status'] ?? 0);
++            $msg    = (string) ($res['error'] ?? 'unknown error');
++            if ($status === 404) {
++                $this->counts['missing']++;
++                $this->log("Attachment '{$g['filename']}' ({$tmp}): not on old server — {$msg}", 'warn');
++            } else {
++                $this->counts['failed']++;
++                $this->log("Attachment '{$g['filename']}' ({$tmp}): download failed — {$msg}", 'error');
++            }
++            return;
++        }
++
++        // Atomically move the completed download into place.
++        if (!@rename($partFile, $target)) {
++            @unlink($partFile);
++            throw new RuntimeException('Could not move downloaded file into uploads/notes/' . self::IMPORT_SUBDIR . '/.');
++        }
++
++        $size = (int) ($res['bytes'] ?? @filesize($target));
++        $this->counts['downloaded']++;
++        $this->counts['bytes'] += $size;
++        $this->syncSize($g['ids'], $size);
++    }
++
++    /** Record the real byte size on every attachment row sharing this file. */
++    private function syncSize(array $ids, int $size): void
++    {
++        if ($size <= 0 || empty($ids)) {
++            return;
++        }
++        $in = implode(',', array_map('intval', $ids));
++        db_exec("UPDATE note_attachments SET size_bytes = ? WHERE id IN ($in)", [$size]);
++    }
++
++    /** Create uploads/notes/old_import/ if missing; throw if it can't be made. */
++    private function ensureImportDir(): string
++    {
++        $dir = dirname(__DIR__) . '/uploads/notes/' . self::IMPORT_SUBDIR;
++        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
++            throw new RuntimeException('Cannot create uploads/notes/' . self::IMPORT_SUBDIR . '/ — check filesystem permissions.');
++        }
++        return $dir;
++    }
++
++    private function log(string $message, string $level = 'info'): void
++    {
++        $this->errors[] = [
++            'level'   => $level,
++            'message' => $message,
++            'time'    => date('H:i:s'),
++        ];
++    }
++}
+diff --git a/sql/migration_20260616_120000_IST.sql b/sql/migration_20260616_120000_IST.sql
+new file mode 100644
+index 0000000..f01eb56
+--- /dev/null
++++ b/sql/migration_20260616_120000_IST.sql
+@@ -0,0 +1,128 @@
++-- MagDyn — migration_20260616_120000_IST
++-- Employee directory (`users_info`) + admin "Employees" module.
++--
++-- `users_info` is a lightweight people list (shop-floor / staff names) that is
++-- independent of the login `users` table. It is the source for the inventory
++-- "Process ▸ Done by" picker (who physically performed a process), so those
++-- names need not be system login accounts.
++--
++--   status: 1 = active, 0 = inactive
++--
++-- This migration:
++--   1) creates `users_info` and seeds the known roster (idempotent),
++--   2) registers the `employees` admin module (employees.php) under the
++--      Admin group with view/create/manage/delete permissions,
++--   3) grants all four permissions to the admin role.
++--
++-- Idempotent + phpMyAdmin-safe (procedure with local DECLAREs, no SET @var).
++
++SET NAMES utf8mb4;
++
++-- ---------------------------------------------------------------------------
++-- 1) Employee table
++-- ---------------------------------------------------------------------------
++CREATE TABLE IF NOT EXISTS `users_info` (
++  `id`     int(11)    NOT NULL AUTO_INCREMENT,
++  `name`   varchar(45) NOT NULL,
++  `status` int(1)     NOT NULL DEFAULT 1,
++  PRIMARY KEY (`id`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
++
++-- Seed the roster only on a fresh table (don't clobber edits on re-run).
++INSERT INTO `users_info` (`id`, `name`, `status`)
++SELECT * FROM (
++    SELECT  1 AS id, 'Dhruva'        AS name, 1 AS status UNION ALL
++    SELECT  2, 'Vignesh', 0        UNION ALL
++    SELECT  3, 'RSK', 1            UNION ALL
++    SELECT  4, 'Kevin', 0          UNION ALL
++    SELECT  5, 'Thiru', 0          UNION ALL
++    SELECT  6, 'Rajeev', 1         UNION ALL
++    SELECT  7, 'Ajith', 0          UNION ALL
++    SELECT  8, 'Kowshig', 0        UNION ALL
++    SELECT  9, 'Mohan', 0          UNION ALL
++    SELECT 10, 'Mahesh', 0         UNION ALL
++    SELECT 11, 'Vidhya', 1         UNION ALL
++    SELECT 12, 'Anju', 1           UNION ALL
++    SELECT 13, 'Rekha', 1          UNION ALL
++    SELECT 14, 'Ramesh', 0         UNION ALL
++    SELECT 15, 'Pramoth', 1        UNION ALL
++    SELECT 16, 'Saravanan', 1      UNION ALL
++    SELECT 17, 'Guna', 1           UNION ALL
++    SELECT 18, 'Prasanna kumar', 0 UNION ALL
++    SELECT 19, 'Antony', 0         UNION ALL
++    SELECT 21, 'Prem', 1           UNION ALL
++    SELECT 22, 'Anthony Peter', 1  UNION ALL
++    SELECT 23, 'Mahalakshmi', 0    UNION ALL
++    SELECT 24, 'Vinod', 1          UNION ALL
++    SELECT 25, 'Vijay Prakash', 0  UNION ALL
++    SELECT 26, 'PalaniRaj', 0      UNION ALL
++    SELECT 27, 'Sathish', 1        UNION ALL
++    SELECT 28, 'James', 1          UNION ALL
++    SELECT 29, 'Munisamy', 1       UNION ALL
++    SELECT 30, 'Muthu', 1          UNION ALL
++    SELECT 31, 'RajMohan', 1       UNION ALL
++    SELECT 32, 'Umapathi', 1       UNION ALL
++    SELECT 33, 'Bikash', 1         UNION ALL
++    SELECT 34, 'Rajesh', 1         UNION ALL
++    SELECT 35, 'Abishek', 1        UNION ALL
++    SELECT 36, 'Ashwanth', 0       UNION ALL
++    SELECT 37, 'RamKumar', 1       UNION ALL
++    SELECT 38, 'RaviKumar', 1      UNION ALL
++    SELECT 39, 'SriRam', 1         UNION ALL
++    SELECT 40, 'Sahul Hameed', 1   UNION ALL
++    SELECT 41, 'Namasivayam', 1    UNION ALL
++    SELECT 42, 'Revathi', 1        UNION ALL
++    SELECT 43, 'Arul Raj', 1
++) AS seed
++WHERE NOT EXISTS (SELECT 1 FROM `users_info` LIMIT 1);
++
++-- ---------------------------------------------------------------------------
++-- 2) + 3) Module registration + permission grants
++-- ---------------------------------------------------------------------------
++DROP PROCEDURE IF EXISTS magdyn_p_add_employees;
++DELIMITER //
++CREATE PROCEDURE magdyn_p_add_employees()
++BEGIN
++    DECLARE v_parent  INT DEFAULT NULL;
++    DECLARE v_mod     INT DEFAULT NULL;
++    DECLARE v_pid     INT DEFAULT NULL;
++
++    -- Sidebar module under the existing Admin group.
++    IF NOT EXISTS (SELECT 1 FROM modules WHERE code = 'employees') THEN
++        SELECT id INTO v_parent FROM modules WHERE code = 'admin' LIMIT 1;
++        INSERT INTO modules (code, name, description, parent_id, is_group, icon, virtual_url, sort_order, is_active)
++        VALUES ('employees', 'Employees',
++                'Shop-floor / staff directory used by the Process "Done by" picker',
++                v_parent, 0, '👷', '/employees.php', 115, 1);
++    END IF;
++
++    SELECT id INTO v_mod FROM modules WHERE code = 'employees' LIMIT 1;
++
++    -- Permissions for the new module.
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'view') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'view', 'View employees');
++    END IF;
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'create') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'create', 'Create employees');
++    END IF;
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'manage') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'manage', 'Edit / activate employees');
++    END IF;
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'delete') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'delete', 'Delete employees');
++    END IF;
++
++    -- Grant every employees permission to the admin role so it works immediately.
++    INSERT INTO role_permissions (role_id, permission_id)
++    SELECT r.id, p.id
++      FROM roles r
++      JOIN permissions p ON p.module_id = v_mod
++     WHERE r.code = 'admin'
++       AND NOT EXISTS (
++            SELECT 1 FROM role_permissions rp
++             WHERE rp.role_id = r.id AND rp.permission_id = p.id
++       );
++END //
++DELIMITER ;
++CALL magdyn_p_add_employees();
++DROP PROCEDURE magdyn_p_add_employees;
+diff --git a/sql/migration_20260616_130000_IST.sql b/sql/migration_20260616_130000_IST.sql
+new file mode 100644
+index 0000000..ed41c37
+--- /dev/null
++++ b/sql/migration_20260616_130000_IST.sql
+@@ -0,0 +1,47 @@
++-- MagDyn — migration_20260616_130000_IST
++-- Register the admin "Old Inventory Import" hub (old_inventory_admin.php) under
++-- the Admin group, with a view permission granted to the admin role only.
++--
++-- The page is a launcher: it gathers every "Import from Old Inventory" flow and
++-- its matching delete / reset controls into one Admin-only place. It adds NO
++-- data columns — only this menu / permission registration.
++--
++-- Idempotent + phpMyAdmin-safe (procedure with local DECLAREs, no SET @var).
++
++SET NAMES utf8mb4;
++
++DROP PROCEDURE IF EXISTS magdyn_p_add_old_inventory_admin;
++DELIMITER //
++CREATE PROCEDURE magdyn_p_add_old_inventory_admin()
++BEGIN
++    DECLARE v_parent INT DEFAULT NULL;
++    DECLARE v_mod    INT DEFAULT NULL;
++    DECLARE v_pview  INT DEFAULT NULL;
++
++    -- 1) Sidebar module under the existing Admin group.
++    IF NOT EXISTS (SELECT 1 FROM modules WHERE code = 'old_inventory_admin') THEN
++        SELECT id INTO v_parent FROM modules WHERE code = 'admin' LIMIT 1;
++        INSERT INTO modules (code, name, description, parent_id, is_group, virtual_url, sort_order, is_active)
++        VALUES ('old_inventory_admin', 'Old Inventory Import',
++                'Admin hub for all import-from-old-inventory and delete / reset flows',
++                v_parent, 0, '/old_inventory_admin.php', 110, 1);
++    END IF;
++
++    SELECT id INTO v_mod FROM modules WHERE code = 'old_inventory_admin' LIMIT 1;
++
++    -- 2) View permission for the new module.
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'view') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'view', 'View old inventory import hub');
++    END IF;
++
++    -- 3) Grant it to the admin role so it appears (admin only).
++    SELECT id INTO v_pview FROM permissions WHERE module_id = v_mod AND code = 'view' LIMIT 1;
++
++    INSERT INTO role_permissions (role_id, permission_id)
++    SELECT r.id, v_pview FROM roles r
++     WHERE r.code = 'admin'
++       AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id = r.id AND rp.permission_id = v_pview);
++END //
++DELIMITER ;
++CALL magdyn_p_add_old_inventory_admin();
++DROP PROCEDURE magdyn_p_add_old_inventory_admin;
+diff --git a/tools.php b/tools.php
+index be8d711..a41c467 100644
+--- a/tools.php
++++ b/tools.php
+@@ -139,7 +139,15 @@ if ($view !== '') {
+ // the MagDyn sidebar already provides navigation. Standalone mode (the
+ // "Open standalone" link, opened in a new tab) gets the tool's full
+ // native UI with its own sidebar intact.
+-$iframeSrc .= ($view !== '' ? '&' : '?') . 'embed=1';
++//
++// Exception: the Weight and Engineering calculators are no longer nested
++// in the sidebar (their sub-tools were removed from the nav), so they
++// must keep their OWN internal menu visible to stay navigable. Render
++// them non-embedded.
++$KEEP_OWN_NAV = ['weight', 'calc'];
++if (!in_array($tool, $KEEP_OWN_NAV, true)) {
++    $iframeSrc .= ($view !== '' ? '&' : '?') . 'embed=1';
++}
+ 
+ require __DIR__ . '/includes/header.php';
+ ?>
+diff --git a/tree7-5.php b/tree7-5.php
+index 0380b38..3da10a2 100644
+--- a/tree7-5.php
++++ b/tree7-5.php
+@@ -204,6 +204,7 @@ function bom_collect_json($id, $con, &$items, &$edges, &$eseen, &$gout, $path)
+             'dwg_no'           => isset($row['cfv_26'])            ? (string)$row['cfv_26']            : '',
+             'rev_no'           => isset($row['cfv_27'])            ? (string)$row['cfv_27']            : '',
+             'part_no'          => isset($row['cfv_28'])            ? (string)$row['cfv_28']            : '',
++            'part_rev_no'      => isset($row['cfv_44'])            ? (string)$row['cfv_44']            : '',
+             'process_spec'     => isset($row['cfv_29'])            ? (string)$row['cfv_29']            : '',
+             'material_spec'    => isset($row['cfv_25'])            ? (string)$row['cfv_25']            : '',
+             'min_stock_level'  => isset($row['cfv_31'])            ? (string)$row['cfv_31']            : '',
+diff --git a/users.php b/users.php
+index ee9a1ec..c7b2d12 100644
+--- a/users.php
++++ b/users.php
+@@ -51,7 +51,12 @@ if ($action === 'save') {
+     if ($clash) $errors[] = 'Another user with that username or email already exists.';
+ 
+     if (!$id && $password === '') $errors[] = 'Password is required for new users.';
+-    if ($password !== '' && strlen($password) < 8) $errors[] = 'Password must be at least 8 characters.';
++    // Enforce a strong-password policy whenever a password is being set.
++    if ($password !== '') {
++        foreach (password_strength_errors($password, ['username' => $username, 'email' => $email]) as $e) {
++            $errors[] = $e;
++        }
++    }
+ 
+     if ($errors) {
+         foreach ($errors as $e) flash_set('error', $e);
+@@ -219,6 +224,10 @@ if ($action === 'new' || $action === 'edit') {
+                     </label>
+                     <input id="f_password" name="password" type="password" tabindex="4"
+                            autocomplete="new-password" <?= $editing ? '' : 'required' ?>>
++                    <span class="muted small">
++                        At least 10 characters with an uppercase letter, a lowercase letter,
++                        a number, and a symbol. Must not contain the username or email.
++                    </span>
+                 </div>
+                 <div class="field span-2">
+                     <label>Roles</label>

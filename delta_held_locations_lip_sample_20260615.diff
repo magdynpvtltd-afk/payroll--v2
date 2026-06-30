@@ -1,0 +1,363 @@
+diff --git a/bom_old_import.php b/bom_old_import.php
+index ba96b7b..250fde7 100644
+--- a/bom_old_import.php
++++ b/bom_old_import.php
+@@ -896,12 +896,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import
+ 
+ // ── AJAX POST: action=import_stock_from_tree ─────────────────────────────────
+ //   Final step of "Import Transactions & Shipments". Fetches the per-item
+-//   stock_locations from tree7-5.php and writes the on-hand (available)
+-//   quantities into MagDyn, mapping ONLY these two old-system locations:
++//   stock_locations from tree7-5.php and writes the on-hand quantities
++//   into MagDyn, mapping these four old-system locations:
+ //
+ //       old "Magdyn"            → MagDyn location  Magdyn   (available qty)
+-//       old "Rejection_Return"  → MagDyn location  LOC-REJ
++//       old "Rejection_Return"  → MagDyn location  LOC-REJ  (quarantine)
++//       old "Lost In Process"   → MagDyn location  LOC-LIP  ┐ held: tracked but
++//       old "Sample"            → MagDyn location  LOC-SMP  ┘ NOT available /
++//                                                            process / shippable
+ //
++//   The two held locations (LOC-LIP / LOC-SMP) are auto-created if absent.
+ //   All other old-system stock locations are ignored. Quantities are set
+ //   absolutely (the old system's current balance), straight into
+ //   inv_item_location_stock — no inv_txns rows are written, so the audit
+@@ -916,9 +920,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import
+     @set_time_limit(300);
+ 
+     // old-system stock location (normalised) → MagDyn locations.code
++    //
++    //   Magdyn           → Magdyn   (available stock)
++    //   Rejection_Return → LOC-REJ  (quarantine; excluded from Avb)
++    //   Lost In Process  → LOC-LIP  ┐ "held" buckets — tracked on-hand but
++    //   Sample           → LOC-SMP  ┘ never Available / process / shippable
++    //                                 (see inv_held_location_codes()).
+     $locMap = [
+         'magdyn'           => 'Magdyn',
+         'rejection_return' => 'LOC-REJ',
++        'lost_in_process'  => 'LOC-LIP',
++        'sample'           => 'LOC-SMP',
++    ];
++
++    // Held locations are auto-created (code → name) on first import so
++    // their quantities always have somewhere to land instead of being
++    // silently counted as skipped_no_loc.
++    $autoCreateLoc = [
++        'LOC-LIP' => 'Lost In Process',
++        'LOC-SMP' => 'Sample',
+     ];
+ 
+     try {
+@@ -933,6 +953,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string)input('action') === 'import
+         foreach (array_unique(array_values($locMap)) as $lc) {
+             $r = db_one('SELECT id FROM locations WHERE code = ? LIMIT 1', [$lc]);
+             if (!$r) $r = db_one('SELECT id FROM locations WHERE LOWER(name) = LOWER(?) LIMIT 1', [$lc]);
++            if (!$r && isset($autoCreateLoc[$lc])) {
++                // First import: stand up the held location so its qty lands
++                // somewhere. Active so it shows in the Locations register and
++                // in Move pickers (qty here can only be added or moved).
++                db_exec(
++                    'INSERT INTO locations (code, name, notes, sort_order, is_active)
++                          VALUES (?, ?, ?, 100, 1)',
++                    [$lc, $autoCreateLoc[$lc],
++                     'Held stock — not available for process or shipment. Imported from old system.']
++                );
++                $newId = (int)db_val('SELECT LAST_INSERT_ID()', [], 0);
++                if ($newId) $r = ['id' => $newId];
++            }
+             $locIds[$lc] = $r ? (int)$r['id'] : null;
+         }
+ 
+@@ -1739,9 +1772,12 @@ require __DIR__ . '/includes/header.php';
+             auto-generated PO number. Run <strong>Delete All Inventory Records</strong> before
+             re-importing — the import refuses to run if <code>inv_txns</code> / <code>inv_shipments</code>
+             already contain rows. As a final step it fetches stock from
+-            <code>tree7-5.php</code> and writes the available quantities into MagDyn —
++            <code>tree7-5.php</code> and writes the quantities into MagDyn —
+             old <strong>Magdyn</strong> → location <code>Magdyn</code> (available),
+-            old <strong>Rejection_Return</strong> → location <code>LOC-Rej</code>.
++            old <strong>Rejection_Return</strong> → location <code>LOC-Rej</code>,
++            old <strong>Lost In Process</strong> → <code>LOC-LIP</code> and
++            old <strong>Sample</strong> → <code>LOC-SMP</code> (held stock — tracked
++            on-hand but not available for process or shipment).
+         </p>
+ 
+         <!-- Progress widget (hidden until import starts) -->
+@@ -1779,7 +1815,7 @@ require __DIR__ . '/includes/header.php';
+                         'shipments' => 'Shipments',
+                         'receipts'  => 'Receipts',
+                         'po'        => 'Purchase Orders',
+-                        'stock'     => 'Stock (Magdyn → Available, Rejection_Return → LOC-Rej)',
++                        'stock'     => 'Stock (Magdyn → Available, Rejection_Return → LOC-Rej, Lost In Process → LOC-LIP, Sample → LOC-SMP)',
+                     ] as $key => $lbl): ?>
+                     <tr id="txn-row-<?= $key ?>">
+                         <td style="padding:7px 10px;border:1px solid #e5e7eb;"><?= h($lbl) ?></td>
+diff --git a/includes/helpers.php b/includes/helpers.php
+index 2d0e275..342927b 100644
+--- a/includes/helpers.php
++++ b/includes/helpers.php
+@@ -702,3 +702,35 @@ function magdyn_setting($key, $default = '')
+     }
+     return $cache[$key] ?? $default;
+ }
++
++
++/**
++ * Codes of the "held" inventory locations whose stock is tracked but is
++ * NOT available for consumption. Qty parked here (imported from the old
++ * system's "Lost In Process" / "Sample" buckets) may only be added to or
++ * moved between locations — it must never count toward Available, nor be
++ * selectable as a source for a Process (build) or a Shipment line.
++ *
++ *   LOC-LIP  → old "Lost In Process"
++ *   LOC-SMP  → old "Sample"
++ *
++ * Returned as plain codes so callers can build SQL IN() lists or compare
++ * against a location row's code. Matching everywhere is case-insensitive
++ * (utf8mb4_unicode_ci), mirroring how LOC-REJ / I-Rework are matched.
++ */
++function inv_held_location_codes()
++{
++    return ['LOC-LIP', 'LOC-SMP'];
++}
++
++/**
++ * SQL fragment "'LOC-LIP','LOC-SMP'" for use inside an IN(...) clause.
++ * Codes are constants from inv_held_location_codes(), never user input,
++ * but we still addslashes() defensively to match the surrounding style.
++ */
++function inv_held_location_codes_sql()
++{
++    return "'" . implode("','", array_map(function ($c) {
++        return addslashes($c);
++    }, inv_held_location_codes())) . "'";
++}
+diff --git a/includes/inventory/bom_views.php b/includes/inventory/bom_views.php
+index cd44f0c..c4a447e 100644
+--- a/includes/inventory/bom_views.php
++++ b/includes/inventory/bom_views.php
+@@ -1178,13 +1178,15 @@ if ($action === 'bom_grid') {
+     //
+     //   $qtyRejByItem[id]    = qty at LOC-REJ
+     //   $qtyReworkByItem[id] = qty at O-Rework + I-Rework
++    //   $qtyHeldByItem[id]   = qty at the held locations (LOC-LIP, LOC-SMP)
+     //   $qtyTotalByItem[id]  = SUM(qty) across ALL locations
+-    //   $avbByItem[id]       = qtyTotal - qtyRej - qtyRework (clamped to >= 0)
++    //   $avbByItem[id]       = qtyTotal - qtyRej - qtyRework - qtyHeld
++    //                          (clamped to >= 0)
+     //   $tbrByItem[id]       = open receive balance from Ship & Receipt
+     //
+     // Location filter is by CODE (case-insensitive, exact match), so the
+     // semantics are stable even if location IDs change. If any of the
+-    // three special locations don't exist in this database, the matching
++    // special locations don't exist in this database, the matching
+     // aggregate for that location is just empty — safe, no error.
+     // ----------------------------------------------------------------
+     $rejCodes    = ['LOC-REJ'];
+@@ -1192,22 +1194,25 @@ if ($action === 'bom_grid') {
+ 
+     $qtyRejByItem    = [];
+     $qtyReworkByItem = [];
++    $qtyHeldByItem   = [];
+     $qtyTotalByItem  = [];
+ 
+-    // Build a single query that returns per-item totals split into three
+-    // buckets — rej, rework, all — in one pass. CASE-style sum is faster
+-    // than three separate queries on Hostinger's MariaDB.
++    // Build a single query that returns per-item totals split into four
++    // buckets — rej, rework, held, all — in one pass. CASE-style sum is
++    // faster than separate queries on Hostinger's MariaDB.
+     //
+     // NOTE: the location table is `locations` (Assets and Inventory share
+     // it after the 2026-05-17 unify-locations migration). The old
+     // `inv_locations` table no longer exists.
+     $rejInList    = "'" . implode("','", array_map(function ($c) { return addslashes($c); }, $rejCodes))    . "'";
+     $reworkInList = "'" . implode("','", array_map(function ($c) { return addslashes($c); }, $reworkCodes)) . "'";
++    $heldInList   = inv_held_location_codes_sql();   // LOC-LIP, LOC-SMP
+ 
+     foreach (db_all(
+         "SELECT s.item_id,
+                 SUM(CASE WHEN l.code COLLATE utf8mb4_unicode_ci IN ($rejInList)    THEN s.qty ELSE 0 END) AS rej_qty,
+                 SUM(CASE WHEN l.code COLLATE utf8mb4_unicode_ci IN ($reworkInList) THEN s.qty ELSE 0 END) AS rework_qty,
++                SUM(CASE WHEN l.code COLLATE utf8mb4_unicode_ci IN ($heldInList)   THEN s.qty ELSE 0 END) AS held_qty,
+                 SUM(s.qty) AS total_qty
+            FROM inv_item_location_stock s
+            JOIN locations l ON l.id = s.location_id
+@@ -1216,6 +1221,7 @@ if ($action === 'bom_grid') {
+         $iid = (int)$r['item_id'];
+         $qtyRejByItem[$iid]    = (float)$r['rej_qty'];
+         $qtyReworkByItem[$iid] = (float)$r['rework_qty'];
++        $qtyHeldByItem[$iid]   = (float)$r['held_qty'];
+         $qtyTotalByItem[$iid]  = (float)$r['total_qty'];
+     }
+ 
+@@ -1389,6 +1395,11 @@ if ($action === 'bom_grid') {
+                             data-open-import="bom-import-modal"
+                             title="Import BOM lines from CSV">⤒ Import BOM CSV</button>
+                 <?php endif; ?>
++                <?php if (permission_check('inventory_shiprcpt', 'manage')): ?>
++                    <button type="button" class="btn btn-sm btn-ghost"
++                            data-open-import="receipt-verify-modal"
++                            title="Upload the old Ship &amp; Receipt Report CSV to mark received shipments">✓ Verify Received CSV</button>
++                <?php endif; ?>
+                 <?php if ($canManageBoms): ?>
+                     <button type="button" class="btn btn-sm btn-primary"
+                             data-open-bom-picker="1"
+@@ -1540,8 +1551,11 @@ if ($action === 'bom_grid') {
+                         $iidThis  = (int)$item['id'];
+                         $rejQty    = isset($qtyRejByItem[$iidThis])    ? $qtyRejByItem[$iidThis]    : 0.0;
+                         $reworkQty = isset($qtyReworkByItem[$iidThis]) ? $qtyReworkByItem[$iidThis] : 0.0;
++                        $heldQty   = isset($qtyHeldByItem[$iidThis])   ? $qtyHeldByItem[$iidThis]   : 0.0;
+                         $totalQty  = isset($qtyTotalByItem[$iidThis])  ? $qtyTotalByItem[$iidThis]  : 0.0;
+-                        $avbQty    = $totalQty - $rejQty - $reworkQty;
++                        // Held stock (LOC-LIP / LOC-SMP) is on-hand but not
++                        // available — excluded from Avb just like rej / rework.
++                        $avbQty    = $totalQty - $rejQty - $reworkQty - $heldQty;
+                         if ($avbQty < 0) $avbQty = 0.0;   // clamp; shouldn't go negative in normal data
+                         $tbrQty    = isset($tbrByItem[$iidThis]) ? $tbrByItem[$iidThis] : 0.0;
+                     ?>
+@@ -2134,6 +2148,21 @@ if ($action === 'bom_grid') {
+               . 'Cycle prevention runs across the union of existing BOM + this CSV.'
+         );
+     endif; ?>
++    <?php if (permission_check('inventory_shiprcpt', 'manage')):
++        import_modal_html(
++            'receipt-verify-modal',
++            'Verify received (Ship & Receipt Report CSV)',
++            url('/inventory.php?action=receipt_verify_preview'),
++            'Upload the old system\'s <strong>Ship and Receipt Report</strong> CSV '
++              . '(columns <code>TransID, …, Status, …</code>). Every transaction whose '
++              . '<code>Status</code> contains <code>RX</code> is matched to its receive '
++              . 'line by <code>TransID</code>; that line\'s received qty is set to its '
++              . 'planned qty and its shipment is marked <strong>received</strong>. '
++              . '<strong>Stock is not changed</strong> — no inventory txns are posted. '
++              . 'You\'ll see a preview before anything is committed.',
++            false  // no upsert toggle
++        );
++    endif; ?>
+     <?php require dirname(__DIR__, 2) . '/includes/footer.php'; exit;
+ }
+ 
+diff --git a/includes/inventory/txns.php b/includes/inventory/txns.php
+index f5fc218..c923643 100644
+--- a/includes/inventory/txns.php
++++ b/includes/inventory/txns.php
+@@ -309,6 +309,27 @@ if ($action === 'txn_process') {
+         $childSource[(int)$lineId] = (int)$locId;
+     }
+ 
++    // Guard: held locations (LOC-LIP / LOC-SMP) may never be a consumption
++    // source — their stock is add/move only. The per-line picker already
++    // excludes them; this rejects a hand-crafted POST that tries anyway.
++    if ($childSource) {
++        $heldInList = inv_held_location_codes_sql();
++        $heldIds = [];
++        foreach (db_all(
++            "SELECT id FROM locations
++              WHERE code COLLATE utf8mb4_unicode_ci IN ($heldInList)"
++        ) as $hr) {
++            $heldIds[(int)$hr['id']] = true;
++        }
++        foreach ($childSource as $locId) {
++            if ($locId && isset($heldIds[$locId])) {
++                flash_set('error', 'Held stock (Lost In Process / Sample) cannot be '
++                    . 'consumed in a build. Move it to an available location first.');
++                redirect(url('/inventory.php?action=process'));
++            }
++        }
++    }
++
+     $errors = [];
+     if (!$productId) $errors[] = 'Item is required.';
+     if ($qty <= 0)   $errors[] = 'Quantity must be greater than zero.';
+@@ -809,7 +830,16 @@ if ($action === 'process') {
+           WHERE i.is_active = 1
+        ORDER BY i.code"
+     );
+-    $locs = db_all('SELECT id, code, name FROM locations WHERE is_active = 1 ORDER BY sort_order, name');
++    // Source-location options for the per-child-line pickers. Held
++    // locations (LOC-LIP / LOC-SMP) are excluded — their stock is tracked
++    // but can never be consumed in a build, only added to or moved.
++    $heldInList = inv_held_location_codes_sql();
++    $locs = db_all(
++        "SELECT id, code, name FROM locations
++          WHERE is_active = 1
++            AND code COLLATE utf8mb4_unicode_ci NOT IN ($heldInList)
++          ORDER BY sort_order, name"
++    );
+     $preProduct = (int)input('product_id', 0);
+     $preDstLoc  = (int)input('dst_location_id', 0);
+ 
+diff --git a/inventory_shiprcpt.php b/inventory_shiprcpt.php
+index 8a13241..7eb7c78 100644
+--- a/inventory_shiprcpt.php
++++ b/inventory_shiprcpt.php
+@@ -817,6 +817,9 @@ if ($action === 'bom_for_receive_item') {
+     $stockByItem = [];
+     if (!empty($childIds)) {
+         $placeholders = implode(',', array_fill(0, count($childIds), '?'));
++        // Held locations (LOC-LIP / LOC-SMP) are excluded — their stock is
++        // tracked but can never be shipped, only added to or moved.
++        $heldInList = inv_held_location_codes_sql();
+         $stockRows = db_all(
+             "SELECT s.item_id, s.location_id, s.qty, l.name AS loc_name, l.code AS loc_code
+                FROM inv_item_location_stock s
+@@ -824,6 +827,7 @@ if ($action === 'bom_for_receive_item') {
+               WHERE s.item_id IN ($placeholders)
+                 AND s.qty > 0
+                 AND l.is_active = 1
++                AND l.code COLLATE utf8mb4_unicode_ci NOT IN ($heldInList)
+               ORDER BY s.qty DESC, l.name",
+             $childIds
+         );
+@@ -877,12 +881,16 @@ if ($action === 'stock_by_location') {
+         echo json_encode(['ok' => false, 'reason' => 'Missing item_id']);
+         exit;
+     }
++    // Held locations (LOC-LIP / LOC-SMP) are excluded — their stock can
++    // never be shipped, only added to or moved.
++    $heldInList = inv_held_location_codes_sql();
+     $rows = db_all(
+-        'SELECT l.id, l.name, l.code, s.qty
++        "SELECT l.id, l.name, l.code, s.qty
+            FROM inv_item_location_stock s
+            JOIN locations l ON l.id = s.location_id
+           WHERE s.item_id = ? AND s.qty > 0 AND l.is_active = 1
+-          ORDER BY s.qty DESC, l.name',
++            AND l.code COLLATE utf8mb4_unicode_ci NOT IN ($heldInList)
++          ORDER BY s.qty DESC, l.name",
+         [$itemId]
+     );
+     echo json_encode([
+@@ -1251,6 +1259,18 @@ if ($action === 'save') {
+         // Step 1 — validate + build a $specs list. Same gates as
+         // before; bad rows still bail out via redirect.
+         // ------------------------------------------------------------
++        // Held locations (LOC-LIP / LOC-SMP) can never be a ship source —
++        // their stock is add/move only. Resolve their ids once for the
++        // per-line guard below (the Source picker already omits them; this
++        // defends against a hand-crafted POST).
++        $heldLocIds = [];
++        $heldInList = inv_held_location_codes_sql();
++        foreach (db_all(
++            "SELECT id FROM locations WHERE code COLLATE utf8mb4_unicode_ci IN ($heldInList)"
++        ) as $hr) {
++            $heldLocIds[(int)$hr['id']] = true;
++        }
++
+         $specs = [];
+         for ($i = 0; $i < $n; $i++) {
+             $lid    = isset($lineIds[$i]) ? (int)$lineIds[$i] : 0;
+@@ -1288,6 +1308,12 @@ if ($action === 'save') {
+                 flash_set('error', 'Each ship line for an inventory item needs a source location.');
+                 redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+             }
++            if ($kind === 'ship' && $entity === 'inv_item' && $itemId > 0 && isset($heldLocIds[$srcId])) {
++                db()->rollBack();
++                flash_set('error', 'Held stock (Lost In Process / Sample) cannot be shipped. '
++                    . 'Move it to an available location first.');
++                redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
++            }
+             if ($kind === 'ship' && $entity === 'inv_item' && $itemId > 0) {
+                 try {
+                     $stockRow = db_one(

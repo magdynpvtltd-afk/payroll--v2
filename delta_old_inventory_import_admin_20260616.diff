@@ -1,0 +1,328 @@
+diff --git a/includes/permissions.php b/includes/permissions.php
+index ff2e116..b7ba5d5 100644
+--- a/includes/permissions.php
++++ b/includes/permissions.php
+@@ -77,6 +77,22 @@ function require_permission($module, $action)
+     }
+ }
+ 
++/**
++ * True when the current (possibly impersonated) user holds the 'admin' role.
++ *
++ * Used to gate UI that should be admin-only regardless of any functional
++ * permission a non-admin role might also hold — e.g. the "Import from Old
++ * Inventory" buttons, which are now reachable only through the Admin ▸
++ * Old Inventory Import hub.
++ */
++function is_admin()
++{
++    foreach (current_user_roles() as $r) {
++        if (($r['code'] ?? '') === 'admin') return true;
++    }
++    return false;
++}
++
+ /** Returns role rows for current user. */
+ function current_user_roles()
+ {
+diff --git a/asset.php b/asset.php
+index 8ad7961..40fc3e1 100644
+--- a/asset.php
++++ b/asset.php
+@@ -2956,8 +2956,11 @@ if ($action === 'list') {
+                       . ' title="Import assets from CSV">⤒ Import CSV</button> ';
+         $actionsHtml .= '<a class="btn btn-primary btn-sm" href="' . h(url('/asset.php?action=new')) . '"'
+                       . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New asset', 'N') . '</a>';
+-        $actionsHtml .= ' <a class="btn btn-ghost btn-sm" href="' . h(url('/old_inventory_import.php')) . '"'
+-                      . ' title="Import assets from old inventory_live database">⤒ Import Old Inventory</a>';
++        // Old-inventory import is admin-only and lives under Admin ▸ Old Inventory Import.
++        if (is_admin()) {
++            $actionsHtml .= ' <a class="btn btn-ghost btn-sm" href="' . h(url('/old_inventory_import.php')) . '"'
++                          . ' title="Import assets from old inventory_live database">⤒ Import Old Inventory</a>';
++        }
+     }
+     if ($canTransact) {
+         // Append after the create-side buttons so the order reads
+diff --git a/invoice.php b/invoice.php
+index 4a03a5c..7af3a5d 100644
+--- a/invoice.php
++++ b/invoice.php
+@@ -2400,8 +2400,11 @@ $listActions = '';
+ if ($canManage) {
+     $listActions .= '<a class="btn btn-primary" href="' . h(url('/invoice.php?action=new')) . '"'
+                   . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New invoice', 'N') . '</a> ';
+-    $listActions .= '<a class="btn btn-ghost" href="' . h(url('/invoice.php?action=import')) . '">'
+-                  . '⬇ Import from Old Inventory</a>';
++    // Old-inventory import is admin-only and lives under Admin ▸ Old Inventory Import.
++    if (is_admin()) {
++        $listActions .= '<a class="btn btn-ghost" href="' . h(url('/invoice.php?action=import')) . '">'
++                      . '⬇ Import from Old Inventory</a>';
++    }
+ }
+ $dtCfg['title']        = 'Invoices';
+ $dtCfg['description']  = 'One row per invoice line item. Each line tracks how much of its qty is linked to receipts / asset transactions. The Link column opens the per-line linker.';
+diff --git a/inspection.php b/inspection.php
+index 9e75054..452c92e 100644
+--- a/inspection.php
++++ b/inspection.php
+@@ -2783,8 +2783,11 @@ if ($action === 'templates') {
+         . ($canCreate
+             ? ' <button type="button" class="btn btn-ghost btn-sm" id="tpl-import-btn"'
+               . ' title="Create a new template from a CSV file">⤒ Import CSV</button>'
+-              . ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_templates')) . '"'
+-              . ' title="Import inspection templates from the old inventory system">⬇ Import from Old Inventory</a>'
++              // Old-inventory import is admin-only (Admin ▸ Old Inventory Import).
++              . (is_admin()
++                  ? ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_templates')) . '"'
++                    . ' title="Import inspection templates from the old inventory system">⬇ Import from Old Inventory</a>'
++                  : '')
+               . ' <a class="btn btn-primary btn-sm" href="' . h(url('/inspection.php?action=template_new')) . '"'
+               . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New template', 'N') . '</a>'
+             : '');
+@@ -5734,8 +5737,11 @@ $rightActions =
+         ? ' <button type="button" class="btn btn-ghost btn-sm"'
+           . ' data-open-import="inspection-import-modal"'
+           . ' title="Import inspection records from CSV">⤒ Import CSV</button>'
+-          . ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_inspections')) . '"'
+-          . ' title="Import inspection records from the old inventory system">⬇ Import from Old Inventory</a>'
++          // Old-inventory import is admin-only (Admin ▸ Old Inventory Import).
++          . (is_admin()
++              ? ' <a class="btn btn-ghost btn-sm" href="' . h(url('/inspection.php?action=import_old_inspections')) . '"'
++                . ' title="Import inspection records from the old inventory system">⬇ Import from Old Inventory</a>'
++              : '')
+           . ' <a class="btn btn-primary btn-sm" href="' . h(url('/inspection.php?action=new')) . '"'
+           . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New inspection', 'N') . '</a>'
+         : '');
+diff --git a/running_notes.php b/running_notes.php
+index 7ebdc65..7bc9b81 100644
+--- a/running_notes.php
++++ b/running_notes.php
+@@ -1434,7 +1434,8 @@ if (permission_check('running_notes', 'create')) {
+     $listActions .= '<a class="btn btn-primary btn-sm" href="' . h(url('/running_notes.php?action=new')) . '"'
+         . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ Add note', 'N') . '</a> ';
+ }
+-if (permission_check('running_notes', 'manage')) {
++// Old-inventory import is admin-only and lives under Admin ▸ Old Inventory Import.
++if (is_admin()) {
+     $listActions .= '<a class="btn btn-ghost btn-sm" href="' . h(url('/running_notes.php?action=import')) . '">'
+         . '⬇ Import from Old Inventory</a>';
+ }
+diff --git a/includes/inventory/bom_views.php b/includes/inventory/bom_views.php
+index c4a447e..c53ec9f 100644
+--- a/includes/inventory/bom_views.php
++++ b/includes/inventory/bom_views.php
+@@ -1389,8 +1389,10 @@ if ($action === 'bom_grid') {
+             <h2 class="dt-toolbar-title bom-actions-title">BOM tree</h2>
+             <div class="dt-toolbar-right">
+                 <?php if ($canCreateBoms || $canManageBoms): ?>
++                    <?php if (is_admin()): /* Old-inventory import is admin-only (Admin ▸ Old Inventory Import). */ ?>
+                     <a class="btn btn-sm btn-ghost" href="<?= h(url('/bom_old_import.php')) ?>"
+                        title="Auto-fetch all BOM trees from old inventory server and import">⬇ Import from Old System</a>
++                    <?php endif; ?>
+                     <button type="button" class="btn btn-sm btn-ghost"
+                             data-open-import="bom-import-modal"
+                             title="Import BOM lines from CSV">⤒ Import BOM CSV</button>
+diff --git a/old_inventory_admin.php b/old_inventory_admin.php
+new file mode 100644
+index 0000000..929b5f5
+--- /dev/null
++++ b/old_inventory_admin.php
+@@ -0,0 +1,145 @@
++<?php
++/**
++ * MagDyn — Admin ▸ Old Inventory Import
++ * Created: 20260616_130000_IST
++ *
++ * Central admin hub that gathers every "Import from Old Inventory" flow (and
++ * its matching delete / reset controls) into one place under the Admin tab.
++ *
++ * Each card links to the existing per-module import page, where the Import
++ * buttons and the Delete / Reset buttons already live together — this page is
++ * purely a launcher, it does not duplicate those flows.
++ *
++ * Visibility: registered as the `old_inventory_admin` module and granted only
++ * to the admin role (see sql/migration_20260616_130000_IST.sql), so it appears
++ * under Admin for administrators only. The scattered per-page import buttons
++ * are likewise gated by is_admin() and now point users here.
++ *
++ * Permissions: old_inventory_admin.view
++ */
++require_once __DIR__ . '/includes/bootstrap.php';
++require_login();
++require_permission('old_inventory_admin', 'view');
++
++$page_title  = 'Old Inventory Import';
++$page_module = 'old_inventory_admin';
++
++/**
++ * Import flows. Each entry: [icon, title, href, what-it-covers, reset-note].
++ */
++$cards = [
++    [
++        'icon'  => '📦',
++        'title' => 'Assets, Vendors &amp; Users',
++        'href'  => url('/old_inventory_import.php'),
++        'desc'  => 'Models, assets and transaction history, plus vendor companies '
++                 . '(contacts / addresses) and user accounts.',
++        'reset' => 'Delete All Asset Records · Delete All Vendors · Delete All Users',
++    ],
++    [
++        'icon'  => '🧬',
++        'title' => 'BOM / Inventory',
++        'href'  => url('/bom_old_import.php'),
++        'desc'  => 'Auto-fetch every BOM tree from <code>tree7-5.php</code> on the old '
++                 . 'server and import items, edges and transactions.',
++        'reset' => 'Delete All Inventory Records',
++    ],
++    [
++        'icon'  => '🧾',
++        'title' => 'Invoices',
++        'href'  => url('/invoice.php?action=import'),
++        'desc'  => 'Migrate <code>approveinv</code> (pending) and <code>recp_inv</code> '
++                 . '(approved) purchase invoices with their line items.',
++        'reset' => 'Delete All Invoices',
++    ],
++    [
++        'icon'  => '📐',
++        'title' => 'Inspection Templates',
++        'href'  => url('/inspection.php?action=import_old_templates'),
++        'desc'  => 'Import the legacy <code>inspection</code> table as reusable '
++                 . 'inspection templates.',
++        'reset' => 'Delete Imported Templates · Delete ALL Templates',
++    ],
++    [
++        'icon'  => '✅',
++        'title' => 'Inspection Records',
++        'href'  => url('/inspection.php?action=import_old_inspections'),
++        'desc'  => 'Import completed inspection records and their results from the '
++                 . 'old system.',
++        'reset' => 'Delete Imported Inspections · Delete ALL Inspections',
++    ],
++    [
++        'icon'  => '📝',
++        'title' => 'Running Notes',
++        'href'  => url('/running_notes.php?action=import'),
++        'desc'  => 'Import <code>inv_notes</code> and their attachment metadata, then '
++                 . 'download the physical attachment files.',
++        'reset' => 'Delete All Running Notes',
++    ],
++];
++
++/** Related read-only / post-import tools. */
++$related = [
++    [
++        'title' => 'Imported Data Viewer',
++        'href'  => url('/old_inv_data.php'),
++        'desc'  => 'Browse the raw data pulled in from the old inventory system.',
++    ],
++    [
++        'title' => 'Creator Backfill',
++        'href'  => url('/admin_user_backfill.php'),
++        'desc'  => 'Stamp the original created-by user onto already-imported records.',
++    ],
++];
++
++require __DIR__ . '/includes/header.php';
++?>
++<div class="form-page">
++    <?= form_toolbar([
++        'title'    => 'Old Inventory Import',
++        'subtitle' => 'Admin-only hub for migrating data from the legacy inventory_live system (192.168.1.249). '
++                    . 'Each card opens a page where the Import and Delete / Reset controls live together.',
++    ]) ?>
++
++    <div class="form-page-body" style="max-width:980px;">
++
++        <div class="alert alert-info" style="margin-bottom:24px;">
++            ⚠ These flows write to and can wipe live data. Run a delete / reset only when you
++            intend a clean re-import.
++        </div>
++
++        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
++            <?php foreach ($cards as $c): ?>
++            <div style="border:1px solid var(--border);border-radius:10px;padding:18px 20px;
++                        background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;
++                        flex-direction:column;gap:10px;">
++                <div style="display:flex;align-items:center;gap:10px;">
++                    <span style="font-size:24px;line-height:1;"><?= $c['icon'] ?></span>
++                    <h3 style="margin:0;font-size:16px;"><?= $c['title'] ?></h3>
++                </div>
++                <p class="muted small" style="margin:0;flex:1;"><?= $c['desc'] ?></p>
++                <div class="small" style="color:#7f1d1d;">
++                    <strong>Reset:</strong> <?= h($c['reset']) ?>
++                </div>
++                <div style="margin-top:4px;">
++                    <a class="btn btn-primary btn-sm" href="<?= h($c['href']) ?>">Open import &amp; reset →</a>
++                </div>
++            </div>
++            <?php endforeach; ?>
++        </div>
++
++        <h3 style="margin:32px 0 10px;">Related tools</h3>
++        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;">
++            <?php foreach ($related as $r): ?>
++            <div style="border:1px solid var(--border);border-radius:10px;padding:16px 18px;
++                        background:#fafafa;display:flex;flex-direction:column;gap:8px;">
++                <h3 style="margin:0;font-size:15px;"><?= h($r['title']) ?></h3>
++                <p class="muted small" style="margin:0;flex:1;"><?= h($r['desc']) ?></p>
++                <div><a class="btn btn-ghost btn-sm" href="<?= h($r['href']) ?>">Open →</a></div>
++            </div>
++            <?php endforeach; ?>
++        </div>
++
++    </div>
++</div>
++<?php require __DIR__ . '/includes/footer.php'; ?>
+diff --git a/sql/migration_20260616_130000_IST.sql b/sql/migration_20260616_130000_IST.sql
+new file mode 100644
+index 0000000..ed41c37
+--- /dev/null
++++ b/sql/migration_20260616_130000_IST.sql
+@@ -0,0 +1,47 @@
++-- MagDyn — migration_20260616_130000_IST
++-- Register the admin "Old Inventory Import" hub (old_inventory_admin.php) under
++-- the Admin group, with a view permission granted to the admin role only.
++--
++-- The page is a launcher: it gathers every "Import from Old Inventory" flow and
++-- its matching delete / reset controls into one Admin-only place. It adds NO
++-- data columns — only this menu / permission registration.
++--
++-- Idempotent + phpMyAdmin-safe (procedure with local DECLAREs, no SET @var).
++
++SET NAMES utf8mb4;
++
++DROP PROCEDURE IF EXISTS magdyn_p_add_old_inventory_admin;
++DELIMITER //
++CREATE PROCEDURE magdyn_p_add_old_inventory_admin()
++BEGIN
++    DECLARE v_parent INT DEFAULT NULL;
++    DECLARE v_mod    INT DEFAULT NULL;
++    DECLARE v_pview  INT DEFAULT NULL;
++
++    -- 1) Sidebar module under the existing Admin group.
++    IF NOT EXISTS (SELECT 1 FROM modules WHERE code = 'old_inventory_admin') THEN
++        SELECT id INTO v_parent FROM modules WHERE code = 'admin' LIMIT 1;
++        INSERT INTO modules (code, name, description, parent_id, is_group, virtual_url, sort_order, is_active)
++        VALUES ('old_inventory_admin', 'Old Inventory Import',
++                'Admin hub for all import-from-old-inventory and delete / reset flows',
++                v_parent, 0, '/old_inventory_admin.php', 110, 1);
++    END IF;
++
++    SELECT id INTO v_mod FROM modules WHERE code = 'old_inventory_admin' LIMIT 1;
++
++    -- 2) View permission for the new module.
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'view') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'view', 'View old inventory import hub');
++    END IF;
++
++    -- 3) Grant it to the admin role so it appears (admin only).
++    SELECT id INTO v_pview FROM permissions WHERE module_id = v_mod AND code = 'view' LIMIT 1;
++
++    INSERT INTO role_permissions (role_id, permission_id)
++    SELECT r.id, v_pview FROM roles r
++     WHERE r.code = 'admin'
++       AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id = r.id AND rp.permission_id = v_pview);
++END //
++DELIMITER ;
++CALL magdyn_p_add_old_inventory_admin();
++DROP PROCEDURE magdyn_p_add_old_inventory_admin;

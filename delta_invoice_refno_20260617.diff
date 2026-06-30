@@ -1,0 +1,220 @@
+diff --git a/invoice.php b/invoice.php
+index 4a03a5c..9080db2 100644
+--- a/invoice.php
++++ b/invoice.php
+@@ -45,6 +45,22 @@ function invoice_asset_txn_types_increasing()
+     return ['create', 'receive_vendor', 'receive_user'];
+ }
+ 
++/**
++ * Next auto-increment reference number for a newly created invoice.
++ *
++ * refno is a MagDyn-assigned running number (distinct from the
++ * vendor-issued invoice_no). It's the highest numeric refno on file + 1,
++ * so new invoices keep counting past any legacy refnos adopted during the
++ * old-inventory import. Non-numeric / NULL refnos are ignored by MAX.
++ */
++function invoice_next_refno()
++{
++    return (int)db_val(
++        'SELECT COALESCE(MAX(CAST(refno AS UNSIGNED)), 0) + 1 FROM invoices',
++        [], 0
++    );
++}
++
+ /**
+  * Pre-fetch the pickable code sets for the new-invoice form. Returns:
+  *   ['assets' => [{code, label}, ...], 'items' => [{code, label, uom, unit_cost, hsn?, gst?}, ...]]
+@@ -554,12 +570,13 @@ if ($action === 'save') {
+         flash_set('success', 'Invoice updated.');
+         redirect(url('/invoice.php?action=view&id=' . $id));
+     } else {
++        $refno = invoice_next_refno();
+         try {
+             db_exec(
+                 'INSERT INTO invoices
+-                   (invoice_no, invoice_date, vendor_id, currency, status, notes, created_by)
+-                 VALUES (?, ?, ?, ?, ?, ?, ?)',
+-                [$invoiceNo, $invoiceDate, $vendorId, $currency, 'pending', $notes ?: null, $uid]
++                   (invoice_no, refno, invoice_date, vendor_id, currency, status, notes, created_by)
++                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
++                [$invoiceNo, (string)$refno, $invoiceDate, $vendorId, $currency, 'pending', $notes ?: null, $uid]
+             );
+         } catch (\Throwable $e) {
+             flash_set('error', 'Could not save invoice: ' . $e->getMessage());
+@@ -864,6 +881,11 @@ if ($action === 'new' || $action === 'edit') {
+     }
+ 
+     $vInvoiceNo   = $inv['invoice_no']   ?? '';
++    // refno is system-assigned (auto-increment), never user-editable. On a
++    // new invoice we show the number it WILL get on save (a live preview —
++    // the authoritative value is generated server-side at save time). On an
++    // existing invoice we show whatever's on record.
++    $vRefno       = $inv['refno'] ?? (string)invoice_next_refno();
+     $vInvoiceDate = $inv['invoice_date'] ?? date('Y-m-d');
+     $vVendorId    = (int)($inv['vendor_id'] ?? $prefillVendorId);
+     $vCurrency    = $inv['currency']     ?? 'INR';
+@@ -898,6 +920,12 @@ if ($action === 'new' || $action === 'edit') {
+                        placeholder="e.g. INV-2026-0042">
+                 <span class="muted small">As issued by the vendor.</span>
+             </div>
++            <div class="field">
++                <label for="f_refno">Ref #</label>
++                <input id="f_refno" type="text" value="<?= h($vRefno) ?>" readonly
++                       style="background:var(--surface-2,#f3f4f6);">
++                <span class="muted small">Auto-assigned reference number<?= $id ? '' : ' (on save)' ?> — not editable.</span>
++            </div>
+             <div class="field">
+                 <label for="f_invoice_date">Invoice date <span class="required">*</span></label>
+                 <input id="f_invoice_date" name="invoice_date" type="date" required
+@@ -1396,6 +1424,7 @@ if ($action === 'view') {
+     <div class="card" style="padding: 18px; margin-bottom: 14px;">
+         <div class="grid-2col">
+             <div><div class="muted small">Invoice #</div><div><strong><?= h($inv['invoice_no']) ?></strong></div></div>
++            <div><div class="muted small">Ref #</div><div><?= $inv['refno'] !== null && $inv['refno'] !== '' ? h($inv['refno']) : '—' ?></div></div>
+             <div><div class="muted small">Status</div><div><?= $statusPill ?></div></div>
+             <div><div class="muted small">Date</div><div><?= h($inv['invoice_date']) ?></div></div>
+             <div><div class="muted small">Vendor</div><div><?= $vendor ? '<code>' . h($vendor['code']) . '</code> ' . h($vendor['name']) : '—' ?></div></div>
+@@ -2242,6 +2271,7 @@ $dtCfg = [
+     'id'       => 'invoices',
+     'base_sql' => "SELECT inv.id            AS invoice_id,
+                           inv.invoice_no,
++                          inv.refno,
+                           inv.invoice_date,
+                           inv.vendor_id,
+                           inv.currency,
+@@ -2274,6 +2304,7 @@ $dtCfg = [
+                 LEFT JOIN invoice_items ii   ON ii.invoice_id = inv.id",
+     'columns'  => [
+         ['key'=>'invoice_no',   'label'=>'Invoice #',  'sortable'=>true, 'searchable'=>true, 'sql_col'=>'inv.invoice_no'],
++        ['key'=>'refno',        'label'=>'Ref #',      'sortable'=>true, 'searchable'=>true, 'sql_col'=>'inv.refno', 'th_class'=>'r','td_class'=>'r'],
+         ['key'=>'invoice_date', 'label'=>'Date',       'sortable'=>true, 'sql_col'=>'inv.invoice_date'],
+         ['key'=>'vendor',       'label'=>'Vendor',     'sortable'=>true, 'searchable'=>true, 'sql_col'=>'v.name'],
+         ['key'=>'item_kind',    'label'=>'Kind',       'sortable'=>true, 'searchable'=>true, 'sql_col'=>'ii.item_kind',
+@@ -2327,6 +2358,7 @@ $rowRenderer = function ($r) use ($canManage) {
+         return [
+             'invoice_no'   => '<strong><a href="' . h(url('/invoice.php?action=view&id=' . (int)$r['invoice_id'])) . '">'
+                               . h($r['invoice_no']) . '</a></strong>',
++            'refno'        => ($r['refno'] !== null && $r['refno'] !== '') ? h($r['refno']) : '—',
+             'invoice_date' => h($r['invoice_date']),
+             'vendor'       => $vendor,
+             'item_kind'    => '<span class="muted small">no items</span>',
+@@ -2382,6 +2414,7 @@ $rowRenderer = function ($r) use ($canManage) {
+     return [
+         'invoice_no'   => '<strong><a href="' . h(url('/invoice.php?action=view&id=' . (int)$r['invoice_id'])) . '">'
+                           . h($r['invoice_no']) . '</a></strong>',
++        'refno'        => ($r['refno'] !== null && $r['refno'] !== '') ? h($r['refno']) : '—',
+         'invoice_date' => h($r['invoice_date']),
+         'vendor'       => $vendor,
+         'item_kind'    => $kindPill,
+@@ -2400,8 +2433,11 @@ $listActions = '';
+ if ($canManage) {
+     $listActions .= '<a class="btn btn-primary" href="' . h(url('/invoice.php?action=new')) . '"'
+                   . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New invoice', 'N') . '</a> ';
+-    $listActions .= '<a class="btn btn-ghost" href="' . h(url('/invoice.php?action=import')) . '">'
+-                  . '⬇ Import from Old Inventory</a>';
++    // Old-inventory import is admin-only and lives under Admin ▸ Old Inventory Import.
++    if (is_admin()) {
++        $listActions .= '<a class="btn btn-ghost" href="' . h(url('/invoice.php?action=import')) . '">'
++                      . '⬇ Import from Old Inventory</a>';
++    }
+ }
+ $dtCfg['title']        = 'Invoices';
+ $dtCfg['description']  = 'One row per invoice line item. Each line tracks how much of its qty is linked to receipts / asset transactions. The Link column opens the per-line linker.';
+diff --git a/services/OldInventoryInvoiceImportService.php b/services/OldInventoryInvoiceImportService.php
+index c409d54..d085ffb 100644
+--- a/services/OldInventoryInvoiceImportService.php
++++ b/services/OldInventoryInvoiceImportService.php
+@@ -243,11 +243,16 @@ class OldInventoryInvoiceImportService
+         $invDate   = $this->normalizeDate((string)($first['inv_date'] ?? ''));
+         $invoiceNo = $this->uniqueInvoiceNo((string)$g['inv_no']);
+ 
++        // Adopt the legacy reference number verbatim. '0' / blank are the
++        // old system's "no ref" placeholders → store NULL.
++        $refno = trim((string)($first['refno'] ?? ''));
++        if ($refno === '' || $refno === '0') { $refno = null; }
++        else { $refno = substr($refno, 0, 32); }
++
+         $noteParts = [];
+         $noteParts[] = 'Imported from old ' . $g['src'] . '.';
+         if (($g['fy'] ?? '') !== '')                 { $noteParts[] = 'FY ' . $g['fy'] . '.'; }
+         if (trim((string)($first['department'] ?? '')) !== '') { $noteParts[] = 'Dept: ' . trim((string)$first['department']) . '.'; }
+-        if (trim((string)($first['refno'] ?? '')) !== '')     { $noteParts[] = 'Ref/voucher: ' . trim((string)$first['refno']) . '.'; }
+         if (trim((string)($first['ledger'] ?? '')) !== '')    { $noteParts[] = 'Ledger: ' . trim((string)$first['ledger']) . '.'; }
+         $headerNotes = implode(' ', $noteParts);
+ 
+@@ -257,18 +262,18 @@ class OldInventoryInvoiceImportService
+             if ($status === 'approved') {
+                 db_exec(
+                     'INSERT INTO invoices
+-                       (invoice_no, invoice_date, vendor_id, currency, status, notes,
++                       (invoice_no, refno, invoice_date, vendor_id, currency, status, notes,
+                         created_by, approved_by, approved_at)
+-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())',
+-                    [$invoiceNo, $invDate, $vendorId, 'INR', 'approved', $headerNotes,
++                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())',
++                    [$invoiceNo, $refno, $invDate, $vendorId, 'INR', 'approved', $headerNotes,
+                      $this->actorId, $this->actorId]
+                 );
+             } else {
+                 db_exec(
+                     'INSERT INTO invoices
+-                       (invoice_no, invoice_date, vendor_id, currency, status, notes, created_by)
+-                     VALUES (?, ?, ?, ?, ?, ?, ?)',
+-                    [$invoiceNo, $invDate, $vendorId, 'INR', 'pending', $headerNotes, $this->actorId]
++                       (invoice_no, refno, invoice_date, vendor_id, currency, status, notes, created_by)
++                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
++                    [$invoiceNo, $refno, $invDate, $vendorId, 'INR', 'pending', $headerNotes, $this->actorId]
+                 );
+             }
+             $invoiceId = (int)db_val('SELECT LAST_INSERT_ID()', [], 0);
+
+=== NEW FILE: sql/migration_20260617_120000_IST.sql ===
+-- MagDyn — migration_20260617_120000_IST
+-- Add `refno` to invoices: an auto-incrementing reference number assigned
+-- per invoice at creation time (distinct from the vendor-issued invoice_no).
+--
+--   * New invoices created in MagDyn get the next sequential number
+--     (MAX numeric refno + 1), auto-populated on save.
+--   * Imported invoices adopt the legacy `refno` from approveinv / recp_inv.
+--
+-- Stored as VARCHAR(32) so legacy values (which may be non-numeric strings)
+-- survive verbatim while new numeric values keep incrementing past them.
+--
+-- Idempotent + phpMyAdmin-safe (guards on information_schema so re-running
+-- is a no-op).
+
+SET NAMES utf8mb4;
+
+-- Column ----------------------------------------------------------------
+SET @col_exists := (
+    SELECT COUNT(*) FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME   = 'invoices'
+       AND COLUMN_NAME  = 'refno'
+);
+SET @ddl := IF(@col_exists = 0,
+    'ALTER TABLE `invoices` ADD COLUMN `refno` VARCHAR(32) DEFAULT NULL AFTER `invoice_no`',
+    'SELECT 1');
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+-- Index -----------------------------------------------------------------
+SET @idx_exists := (
+    SELECT COUNT(*) FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME   = 'invoices'
+       AND INDEX_NAME   = 'ix_invoices_refno'
+);
+SET @ddl := IF(@idx_exists = 0,
+    'ALTER TABLE `invoices` ADD KEY `ix_invoices_refno` (`refno`)',
+    'SELECT 1');
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+=== schema.sql change (untracked db/) ===
+Added to CREATE TABLE invoices:
+  + `refno` varchar(32) DEFAULT NULL  (after invoice_no)
+  + KEY `ix_invoices_refno` (`refno`)

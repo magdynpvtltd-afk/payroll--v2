@@ -1,0 +1,553 @@
+diff --git a/employees.php b/employees.php
+new file mode 100644
+index 0000000..a9f0ff3
+--- /dev/null
++++ b/employees.php
+@@ -0,0 +1,271 @@
++<?php
++/**
++ * MagDyn — Employees (shop-floor / staff directory)
++ * Created: 20260616_120000_IST
++ *
++ * Lightweight people list stored in `users_info` (id, name, status).
++ * status: 1 = active, 0 = inactive. Independent of login `users` — this is
++ * the source for the inventory "Process ▸ Done by" picker.
++ *
++ * Actions:
++ *   ?action=index           list (default)
++ *   ?action=view&id=N       read-only detail
++ *   ?action=new             new employee form
++ *   ?action=edit&id=N       edit existing
++ *   ?action=save  (POST)    create/update
++ *   ?action=toggle&id=N (POST)  activate/deactivate
++ *   ?action=delete (POST)   delete
++ */
++require_once __DIR__ . '/includes/bootstrap.php';
++require_login();
++require_permission('employees', 'view');
++
++$action = (string)input('action', 'index');
++
++// ============================================================
++// POST handlers
++// ============================================================
++
++if ($action === 'save') {
++    csrf_check();
++    $id     = (int)input('id', 0);
++    $name   = trim((string)input('name'));
++    $status = input('status') ? 1 : 0;
++
++    $errors = [];
++    if ($name === '')            $errors[] = 'Name is required.';
++    if (mb_strlen($name) > 45)   $errors[] = 'Name must be 45 characters or fewer.';
++
++    // Soft uniqueness: reject an exact (case-insensitive) duplicate name.
++    if ($name !== '') {
++        $clash = db_one(
++            'SELECT id FROM users_info WHERE name = ? AND id <> ? LIMIT 1',
++            [$name, $id]
++        );
++        if ($clash) $errors[] = 'Another employee with that name already exists.';
++    }
++
++    if (!$id) require_permission('employees', 'create');
++    else      require_permission('employees', 'manage');
++
++    if ($errors) {
++        foreach ($errors as $e) flash_set('error', $e);
++        $back = $id ? url('/employees.php?action=edit&id=' . $id) : url('/employees.php?action=new');
++        redirect($back);
++    }
++
++    if ($id) {
++        db_exec('UPDATE users_info SET name = ?, status = ? WHERE id = ?', [$name, $status, $id]);
++        flash_set('success', 'Employee updated.');
++    } else {
++        db_exec('INSERT INTO users_info (name, status) VALUES (?, ?)', [$name, $status]);
++        flash_set('success', 'Employee created.');
++    }
++    redirect(url('/employees.php'));
++}
++
++if ($action === 'toggle' && $_SERVER['REQUEST_METHOD'] === 'POST') {
++    require_permission('employees', 'manage');
++    csrf_check();
++    $id = (int)input('id', 0);
++    if ($id) {
++        db_exec('UPDATE users_info SET status = 1 - status WHERE id = ?', [$id]);
++        flash_set('success', 'Employee status toggled.');
++    }
++    redirect(url('/employees.php'));
++}
++
++if ($action === 'delete' && $_SERVER['REQUEST_METHOD'] === 'POST') {
++    require_permission('employees', 'delete');
++    csrf_check();
++    $id = (int)input('id', 0);
++    if (!$id) { flash_set('error', 'No employee specified.'); redirect(url('/employees.php')); }
++    $e = db_one('SELECT name FROM users_info WHERE id = ?', [$id]);
++    if (!$e) { flash_set('error', 'Employee not found.'); redirect(url('/employees.php')); }
++    db_exec('DELETE FROM users_info WHERE id = ?', [$id]);
++    flash_set('success', 'Employee deleted.');
++    redirect(url('/employees.php'));
++}
++
++// ============================================================
++// VIEW (read-only detail)
++// ============================================================
++if ($action === 'view') {
++    $id  = (int)input('id', 0);
++    $emp = db_one('SELECT * FROM users_info WHERE id = ?', [$id]);
++    if (!$emp) {
++        flash_set('error', 'Employee not found.');
++        redirect(url('/employees.php'));
++    }
++    $canManage = permission_check('employees', 'manage');
++
++    $page_title  = 'Employee · ' . $emp['name'];
++    $page_module = 'employees';
++    require __DIR__ . '/includes/header.php';
++    ?>
++    <div class="page-head">
++        <div>
++            <h1><?= h($emp['name']) ?></h1>
++            <p class="muted">Employee #<?= (int)$emp['id'] ?></p>
++        </div>
++        <div class="head-actions">
++            <a class="btn btn-ghost" href="<?= h(url('/employees.php')) ?>">← Employees</a>
++            <?php if ($canManage): ?>
++                <a class="btn btn-primary" href="<?= h(url('/employees.php?action=edit&id=' . (int)$emp['id'])) ?>">Edit</a>
++            <?php endif; ?>
++        </div>
++    </div>
++    <div class="card">
++        <div class="card-body">
++            <table class="data-table">
++                <tbody>
++                    <tr><th style="width:160px;">Name</th><td><?= h($emp['name']) ?></td></tr>
++                    <tr><th>Status</th><td>
++                        <?= $emp['status']
++                            ? '<span class="pill pill-active">active</span>'
++                            : '<span class="pill pill-neutral">inactive</span>' ?>
++                    </td></tr>
++                </tbody>
++            </table>
++        </div>
++    </div>
++    <?php
++    require __DIR__ . '/includes/footer.php';
++    exit;
++}
++
++// ============================================================
++// NEW / EDIT form
++// ============================================================
++if ($action === 'new' || $action === 'edit') {
++    $editing = null;
++    if ($action === 'edit') {
++        require_permission('employees', 'manage');
++        $id = (int)input('id', 0);
++        $editing = db_one('SELECT * FROM users_info WHERE id = ?', [$id]);
++        if (!$editing) {
++            flash_set('error', 'Employee not found.');
++            redirect(url('/employees.php'));
++        }
++    } else {
++        require_permission('employees', 'create');
++    }
++
++    $page_title  = $editing ? 'Edit employee' : 'New employee';
++    $page_module = 'employees';
++    $focus_id    = 'f_name';
++    require __DIR__ . '/includes/header.php';
++    ?>
++    <div class="form-page">
++        <?= form_toolbar([
++            'title'       => $editing ? 'Edit employee' : 'New employee',
++            'subtitle'    => $editing ? $editing['name'] : 'Add a person to the directory',
++            'back_href'   => url('/employees.php'),
++            'back_label'  => 'Employees',
++            'actions_html' =>
++                '<button type="submit" form="main-form" class="btn btn-primary btn-sm"'
++              . ' data-shortcut="S">' . shortcut_label('Save', 'S') . '</button>'
++              . ' <a class="btn btn-ghost btn-sm" href="' . h(url('/employees.php')) . '"'
++              . ' data-shortcut="C" accesskey="c">' . shortcut_label('Cancel', 'C') . '</a>',
++        ]) ?>
++        <form id="main-form" class="form-page-body" method="post"
++              action="<?= h(url('/employees.php?action=save')) ?>" novalidate>
++            <?= csrf_field() ?>
++            <input type="hidden" name="id" value="<?= $editing ? (int)$editing['id'] : '' ?>">
++            <div class="form-grid">
++                <div class="field span-2">
++                    <label for="f_name"><?= shortcut_label('Name', 'N') ?> *</label>
++                    <input id="f_name" name="name" type="text" tabindex="1" required maxlength="45"
++                           value="<?= h($editing['name'] ?? '') ?>">
++                </div>
++                <div class="field">
++                    <label class="nowrap" style="font-weight: normal;">
++                        <input type="checkbox" name="status" value="1" tabindex="2"
++                               <?= (!$editing || $editing['status']) ? 'checked' : '' ?>>
++                        <?= shortcut_label('Active', 'A') ?>
++                    </label>
++                </div>
++            </div>
++        </form>
++    </div>
++    <?php
++    require __DIR__ . '/includes/footer.php';
++    exit;
++}
++
++// ============================================================
++// LIST
++// ============================================================
++require_once __DIR__ . '/includes/datatable.php';
++
++$canCreate = permission_check('employees', 'create');
++$canManage = permission_check('employees', 'manage');
++$canDelete = permission_check('employees', 'delete');
++
++$dtCfg = [
++    'id'       => 'employees',
++    'base_sql' => 'SELECT e.* FROM users_info e',
++    'columns'  => [
++        ['key'=>'name',     'label'=>'Name',    'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.name'],
++        ['key'=>'status',   'label'=>'Status',  'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.status'],
++        ['key'=>'_actions', 'label'=>'Actions', 'sortable'=>false,'searchable'=>false, 'th_class'=>'r', 'td_class'=>'r nowrap'],
++    ],
++    'default_sort' => ['name', 'asc'],
++];
++
++$rowRenderer = function ($e) use ($canManage, $canDelete) {
++    $name = $canManage
++          ? '<strong><a href="' . h(url('/employees.php?action=edit&id=' . (int)$e['id'])) . '">' . h($e['name']) . '</a></strong>'
++          : '<strong><a href="' . h(url('/employees.php?action=view&id=' . (int)$e['id'])) . '">' . h($e['name']) . '</a></strong>';
++
++    $status = $e['status']
++        ? '<span class="pill pill-active">active</span>'
++        : '<span class="pill pill-neutral">inactive</span>';
++
++    $actions = '<a class="btn btn-icon" title="View" aria-label="View" href="'
++             . h(url('/employees.php?action=view&id=' . (int)$e['id'])) . '">👁 <span class="dt-action-label">View</span></a> ';
++    if ($canManage) {
++        $actions .= '<a class="btn btn-icon" title="Edit employee" aria-label="Edit employee" href="'
++                  . h(url('/employees.php?action=edit&id=' . (int)$e['id'])) . '">✎ <span class="dt-action-label">Edit</span></a> ';
++        $toggleTitle = $e['status'] ? 'Deactivate' : 'Activate';
++        $toggleGlyph = $e['status'] ? '🚫' : '✅';
++        $actions .= '<form method="post" style="display:inline" action="' . h(url('/employees.php?action=toggle')) . '">'
++                  . csrf_field()
++                  . '<input type="hidden" name="id" value="' . (int)$e['id'] . '">'
++                  . '<button class="btn btn-icon" type="submit" title="' . h($toggleTitle) . '" aria-label="' . h($toggleTitle) . '">'
++                  . $toggleGlyph . ' <span class="dt-action-label">' . h($toggleTitle) . '</span></button></form> ';
++    }
++    if ($canDelete) {
++        $actions .= '<form method="post" style="display:inline" action="' . h(url('/employees.php?action=delete')) . '"'
++                  . ' onsubmit="return confirm(\'Permanently delete ' . h(addslashes($e['name'])) . '? This cannot be undone.\');">'
++                  . csrf_field()
++                  . '<input type="hidden" name="id" value="' . (int)$e['id'] . '">'
++                  . '<button class="btn btn-icon btn-danger" type="submit" title="Delete employee" aria-label="Delete employee">🗑 <span class="dt-action-label">Delete</span></button></form>';
++    }
++
++    return [
++        'name'     => $name,
++        'status'   => $status,
++        '_actions' => dt_actions_wrap($actions),
++    ];
++};
++
++$dt = data_table_run($dtCfg, $rowRenderer);
++// data_table_run() exits before reaching here on JSON requests.
++
++$page_title  = 'Employees';
++$page_module = 'employees';
++$focus_id    = '';
++
++$actionsHtml = '';
++if ($canCreate) {
++    $actionsHtml = '<a class="btn btn-primary btn-sm" href="' . h(url('/employees.php?action=new')) . '"'
++                 . ' data-shortcut="N" accesskey="n">' . shortcut_label('+ New employee', 'N') . '</a>';
++}
++$dtCfg['title']        = 'Employees';
++$dtCfg['actions_html'] = $actionsHtml;
++
++require __DIR__ . '/includes/header.php';
++?>
++<?php data_table_render($dtCfg, $dt, $rowRenderer); ?>
++<?php require __DIR__ . '/includes/footer.php'; ?>
+diff --git a/includes/inventory/txns.php b/includes/inventory/txns.php
+index f5fc218..43d36db 100644
+--- a/includes/inventory/txns.php
++++ b/includes/inventory/txns.php
+@@ -309,6 +309,27 @@ if ($action === 'txn_process') {
+         $childSource[(int)$lineId] = (int)$locId;
+     }
+ 
++    // Guard: held locations (LOC-LIP / LOC-SMP) may never be a consumption
++    // source — their stock is add/move only. The per-line picker already
++    // excludes them; this rejects a hand-crafted POST that tries anyway.
++    if ($childSource) {
++        $heldInList = inv_held_location_codes_sql();
++        $heldIds = [];
++        foreach (db_all(
++            "SELECT id FROM locations
++              WHERE code COLLATE utf8mb4_unicode_ci IN ($heldInList)"
++        ) as $hr) {
++            $heldIds[(int)$hr['id']] = true;
++        }
++        foreach ($childSource as $locId) {
++            if ($locId && isset($heldIds[$locId])) {
++                flash_set('error', 'Held stock (Lost In Process / Sample) cannot be '
++                    . 'consumed in a build. Move it to an available location first.');
++                redirect(url('/inventory.php?action=process'));
++            }
++        }
++    }
++
+     $errors = [];
+     if (!$productId) $errors[] = 'Item is required.';
+     if ($qty <= 0)   $errors[] = 'Quantity must be greater than zero.';
+@@ -402,9 +423,31 @@ if ($action === 'txn_process') {
+     try {
+         db()->beginTransaction();
+ 
++        // Resolve done_by employee IDs (users_info) + names up-front. The
++        // names are stamped into the header note ("Process done by …") as
++        // well as persisted to inv_txn_done_by below. Reads the multi-select
++        // POST `done_by[]`; unknown / duplicate IDs are silently dropped.
++        $doneByRaw = isset($_POST['done_by']) ? (array)$_POST['done_by'] : [];
++        $doneBy    = array_values(array_unique(array_filter(array_map('intval', $doneByRaw))));
++        $doneByNames = [];
++        if ($doneBy) {
++            $ph   = implode(',', array_fill(0, count($doneBy), '?'));
++            $rows = db_all("SELECT id, name FROM users_info WHERE id IN ($ph)", $doneBy);
++            $nameById = [];
++            foreach ($rows as $r) $nameById[(int)$r['id']] = $r['name'];
++            // Preserve the order the user picked them in.
++            foreach ($doneBy as $eid) {
++                if (isset($nameById[$eid])) $doneByNames[] = $nameById[$eid];
++            }
++        }
++
+         // 1. Increment the produced item at the DESTINATION location.
+-        $headerNote = $notes;
+-        if (!$headerNote) {
++        //    Header note = "Process done by <names>" + the user's notes.
++        $noteParts = [];
++        if ($doneByNames) $noteParts[] = 'Process done by ' . implode(', ', $doneByNames);
++        if ($notes)       $noteParts[] = $notes;
++        $headerNote = implode(' — ', $noteParts);
++        if ($headerNote === '') {
+             if ($directAddition) {
+                 $headerNote = 'Direct addition: ' . $qty . ' x ' . $product['code'];
+             } elseif ($reworkFlag) {
+@@ -421,11 +464,7 @@ if ($action === 'txn_process') {
+             null, $refDoc, $headerNote
+         );
+ 
+-        // Persist done_by: zero or more user IDs attached to the header
+-        // txn. Reads from the multi-select POST `done_by[]`. Silently
+-        // ignores duplicates and unknown IDs (FK + PK enforce sanity).
+-        $doneByRaw = isset($_POST['done_by']) ? (array)$_POST['done_by'] : [];
+-        $doneBy    = array_values(array_unique(array_filter(array_map('intval', $doneByRaw))));
++        // Persist done_by rows (PK on (txn_id, user_id) dedupes).
+         foreach ($doneBy as $uid) {
+             db_exec(
+                 'INSERT IGNORE INTO inv_txn_done_by (txn_id, user_id) VALUES (?, ?)',
+@@ -809,7 +848,16 @@ if ($action === 'process') {
+           WHERE i.is_active = 1
+        ORDER BY i.code"
+     );
+-    $locs = db_all('SELECT id, code, name FROM locations WHERE is_active = 1 ORDER BY sort_order, name');
++    // Source-location options for the per-child-line pickers. Held
++    // locations (LOC-LIP / LOC-SMP) are excluded — their stock is tracked
++    // but can never be consumed in a build, only added to or moved.
++    $heldInList = inv_held_location_codes_sql();
++    $locs = db_all(
++        "SELECT id, code, name FROM locations
++          WHERE is_active = 1
++            AND code COLLATE utf8mb4_unicode_ci NOT IN ($heldInList)
++          ORDER BY sort_order, name"
++    );
+     $preProduct = (int)input('product_id', 0);
+     $preDstLoc  = (int)input('dst_location_id', 0);
+ 
+@@ -845,15 +893,15 @@ if ($action === 'process') {
+         $locsForJs[] = ['id' => (int)$l['id'], 'name' => $l['name'], 'code' => $l['code']];
+     }
+ 
+-    // Active users for the "Done by" multi-select. Includes the current
+-    // user pre-selected so the common one-person case requires no clicks.
++    // Active employees (users_info) for the "Done by" multi-select. These
++    // are shop-floor / staff names (not login accounts), managed under
++    // Admin ▸ Employees. status = 1 means active.
+     $activeUsers = db_all(
+-        "SELECT id, full_name, email
+-           FROM users
+-          WHERE is_active = 1
+-          ORDER BY full_name, email"
++        "SELECT id, name
++           FROM users_info
++          WHERE status = 1
++          ORDER BY name"
+     );
+-    $currentUid = current_user_id();
+ 
+     $page_title  = 'Process inventory';
+     $page_module = 'inventory_process';
+@@ -922,16 +970,14 @@ if ($action === 'process') {
+                     <div class="field">
+                         <label for="f_done_by">Done by</label>
+                         <select id="f_done_by" name="done_by[]" multiple class="chips" tabindex="6"
+-                                data-placeholder="Pick one or more users…">
+-                            <?php foreach ($activeUsers as $u):
+-                                $sel = (int)$u['id'] === (int)$currentUid;
+-                            ?>
+-                                <option value="<?= (int)$u['id'] ?>" <?= $sel ? 'selected' : '' ?>>
+-                                    <?= h($u['full_name'] ?: $u['email']) ?>
++                                data-placeholder="Pick one or more employees…">
++                            <?php foreach ($activeUsers as $u): ?>
++                                <option value="<?= (int)$u['id'] ?>">
++                                    <?= h($u['name']) ?>
+                                 </option>
+                             <?php endforeach; ?>
+                         </select>
+-                        <span class="muted small">Logged-in user is pre-selected. Add others as needed.</span>
++                        <span class="muted small">Pick the employee(s) who performed this process. Manage the list under Admin ▸ Employees.</span>
+                     </div>
+ 
+                     <div class="field">
+diff --git a/sql/migration_20260616_120000_IST.sql b/sql/migration_20260616_120000_IST.sql
+new file mode 100644
+index 0000000..f01eb56
+--- /dev/null
++++ b/sql/migration_20260616_120000_IST.sql
+@@ -0,0 +1,128 @@
++-- MagDyn — migration_20260616_120000_IST
++-- Employee directory (`users_info`) + admin "Employees" module.
++--
++-- `users_info` is a lightweight people list (shop-floor / staff names) that is
++-- independent of the login `users` table. It is the source for the inventory
++-- "Process ▸ Done by" picker (who physically performed a process), so those
++-- names need not be system login accounts.
++--
++--   status: 1 = active, 0 = inactive
++--
++-- This migration:
++--   1) creates `users_info` and seeds the known roster (idempotent),
++--   2) registers the `employees` admin module (employees.php) under the
++--      Admin group with view/create/manage/delete permissions,
++--   3) grants all four permissions to the admin role.
++--
++-- Idempotent + phpMyAdmin-safe (procedure with local DECLAREs, no SET @var).
++
++SET NAMES utf8mb4;
++
++-- ---------------------------------------------------------------------------
++-- 1) Employee table
++-- ---------------------------------------------------------------------------
++CREATE TABLE IF NOT EXISTS `users_info` (
++  `id`     int(11)    NOT NULL AUTO_INCREMENT,
++  `name`   varchar(45) NOT NULL,
++  `status` int(1)     NOT NULL DEFAULT 1,
++  PRIMARY KEY (`id`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
++
++-- Seed the roster only on a fresh table (don't clobber edits on re-run).
++INSERT INTO `users_info` (`id`, `name`, `status`)
++SELECT * FROM (
++    SELECT  1 AS id, 'Dhruva'        AS name, 1 AS status UNION ALL
++    SELECT  2, 'Vignesh', 0        UNION ALL
++    SELECT  3, 'RSK', 1            UNION ALL
++    SELECT  4, 'Kevin', 0          UNION ALL
++    SELECT  5, 'Thiru', 0          UNION ALL
++    SELECT  6, 'Rajeev', 1         UNION ALL
++    SELECT  7, 'Ajith', 0          UNION ALL
++    SELECT  8, 'Kowshig', 0        UNION ALL
++    SELECT  9, 'Mohan', 0          UNION ALL
++    SELECT 10, 'Mahesh', 0         UNION ALL
++    SELECT 11, 'Vidhya', 1         UNION ALL
++    SELECT 12, 'Anju', 1           UNION ALL
++    SELECT 13, 'Rekha', 1          UNION ALL
++    SELECT 14, 'Ramesh', 0         UNION ALL
++    SELECT 15, 'Pramoth', 1        UNION ALL
++    SELECT 16, 'Saravanan', 1      UNION ALL
++    SELECT 17, 'Guna', 1           UNION ALL
++    SELECT 18, 'Prasanna kumar', 0 UNION ALL
++    SELECT 19, 'Antony', 0         UNION ALL
++    SELECT 21, 'Prem', 1           UNION ALL
++    SELECT 22, 'Anthony Peter', 1  UNION ALL
++    SELECT 23, 'Mahalakshmi', 0    UNION ALL
++    SELECT 24, 'Vinod', 1          UNION ALL
++    SELECT 25, 'Vijay Prakash', 0  UNION ALL
++    SELECT 26, 'PalaniRaj', 0      UNION ALL
++    SELECT 27, 'Sathish', 1        UNION ALL
++    SELECT 28, 'James', 1          UNION ALL
++    SELECT 29, 'Munisamy', 1       UNION ALL
++    SELECT 30, 'Muthu', 1          UNION ALL
++    SELECT 31, 'RajMohan', 1       UNION ALL
++    SELECT 32, 'Umapathi', 1       UNION ALL
++    SELECT 33, 'Bikash', 1         UNION ALL
++    SELECT 34, 'Rajesh', 1         UNION ALL
++    SELECT 35, 'Abishek', 1        UNION ALL
++    SELECT 36, 'Ashwanth', 0       UNION ALL
++    SELECT 37, 'RamKumar', 1       UNION ALL
++    SELECT 38, 'RaviKumar', 1      UNION ALL
++    SELECT 39, 'SriRam', 1         UNION ALL
++    SELECT 40, 'Sahul Hameed', 1   UNION ALL
++    SELECT 41, 'Namasivayam', 1    UNION ALL
++    SELECT 42, 'Revathi', 1        UNION ALL
++    SELECT 43, 'Arul Raj', 1
++) AS seed
++WHERE NOT EXISTS (SELECT 1 FROM `users_info` LIMIT 1);
++
++-- ---------------------------------------------------------------------------
++-- 2) + 3) Module registration + permission grants
++-- ---------------------------------------------------------------------------
++DROP PROCEDURE IF EXISTS magdyn_p_add_employees;
++DELIMITER //
++CREATE PROCEDURE magdyn_p_add_employees()
++BEGIN
++    DECLARE v_parent  INT DEFAULT NULL;
++    DECLARE v_mod     INT DEFAULT NULL;
++    DECLARE v_pid     INT DEFAULT NULL;
++
++    -- Sidebar module under the existing Admin group.
++    IF NOT EXISTS (SELECT 1 FROM modules WHERE code = 'employees') THEN
++        SELECT id INTO v_parent FROM modules WHERE code = 'admin' LIMIT 1;
++        INSERT INTO modules (code, name, description, parent_id, is_group, icon, virtual_url, sort_order, is_active)
++        VALUES ('employees', 'Employees',
++                'Shop-floor / staff directory used by the Process "Done by" picker',
++                v_parent, 0, '👷', '/employees.php', 115, 1);
++    END IF;
++
++    SELECT id INTO v_mod FROM modules WHERE code = 'employees' LIMIT 1;
++
++    -- Permissions for the new module.
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'view') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'view', 'View employees');
++    END IF;
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'create') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'create', 'Create employees');
++    END IF;
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'manage') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'manage', 'Edit / activate employees');
++    END IF;
++    IF NOT EXISTS (SELECT 1 FROM permissions WHERE module_id = v_mod AND code = 'delete') THEN
++        INSERT INTO permissions (module_id, code, name) VALUES (v_mod, 'delete', 'Delete employees');
++    END IF;
++
++    -- Grant every employees permission to the admin role so it works immediately.
++    INSERT INTO role_permissions (role_id, permission_id)
++    SELECT r.id, p.id
++      FROM roles r
++      JOIN permissions p ON p.module_id = v_mod
++     WHERE r.code = 'admin'
++       AND NOT EXISTS (
++            SELECT 1 FROM role_permissions rp
++             WHERE rp.role_id = r.id AND rp.permission_id = p.id
++       );
++END //
++DELIMITER ;
++CALL magdyn_p_add_employees();
++DROP PROCEDURE magdyn_p_add_employees;

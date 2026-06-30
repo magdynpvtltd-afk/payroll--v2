@@ -1,0 +1,54 @@
+diff --git a/inspection.php b/inspection.php
+index 7fe5e1b..aa61821 100644
+--- a/inspection.php
++++ b/inspection.php
+@@ -6231,6 +6231,10 @@ $dtCfg = [
+                          ii.long_description,
+                          i.part_description) AS part_name,
+                 COALESCE(et_i.code, ii.code, i.part_no, i.pid) AS part_code,
++                -- Item Part number + Rev no, same cascading fallback as part_name:
++                --   txn-linked item → direct inv_item → snapshot on the inspection.
++                COALESCE(NULLIF(et_i.part_no, ''), NULLIF(ii.part_no, ''), NULLIF(i.part_no, '')) AS item_part_no,
++                COALESCE(NULLIF(et_i.part_rev_no, ''), NULLIF(ii.part_rev_no, ''), NULLIF(i.part_rev, '')) AS item_part_rev,
+                 -- 'From' source label, used for sort + filter (display
+                 -- adds the receipt_no prefix in the row renderer).
+                 CASE
+@@ -6284,6 +6288,14 @@ $dtCfg = [
+                                         ii.long_description,
+                                         i.part_description, ''),
+                                ' ', COALESCE(jc.po_no, ''))"],
++        ['key'=>'item_part_rev',  'label'=>'Part number-Rev.no', 'sortable'=>true, 'searchable'=>true,
++            // Combined "PARTNO-REV" (rev suffix only when present), with the
++            // same et_i → ii → snapshot fallback used by part_name above.
++            'sql_col'=>"CONCAT(
++                COALESCE(NULLIF(et_i.part_no, ''), NULLIF(ii.part_no, ''), NULLIF(i.part_no, ''), ''),
++                CASE WHEN COALESCE(NULLIF(et_i.part_rev_no, ''), NULLIF(ii.part_rev_no, ''), NULLIF(i.part_rev, '')) <> ''
++                     THEN CONCAT('-', COALESCE(NULLIF(et_i.part_rev_no, ''), NULLIF(ii.part_rev_no, ''), NULLIF(i.part_rev, '')))
++                     ELSE '' END)"],
+         ['key'=>'txn_at',         'label'=>'Date',          'sortable'=>true, 'sql_col'=>'et.created_at',
+             'td_class'=>'nowrap'],
+         ['key'=>'txn_qty',        'label'=>'Qty',           'sortable'=>true, 'sql_col'=>'et.qty_delta',
+@@ -6391,12 +6403,23 @@ $rowRenderer = function ($r) use ($canCreate) {
+         $fromCell = h($r['from_label'] ?: '—');
+     }
+ 
++    // Part number-Rev.no cell — "PARTNO-REV", with the rev shown only
++    // when present. Both pieces blank → muted dash.
++    $partNoBits = array_filter([
++        trim((string)($r['item_part_no']  ?? '')),
++        trim((string)($r['item_part_rev'] ?? '')),
++    ], 'strlen');
++    $partRevCell = $partNoBits
++        ? h(implode('-', $partNoBits))
++        : '<span class="muted small">—</span>';
++
+     return [
+         'ir_no'             => $irCell,
+         'inspection_type'   => '<span class="pill pill-neutral">' . h(inspection_type_label($r['inspection_type'])) . '</span>',
+         'txn_id'            => $txnCell,
+         'from_label'        => $fromCell,
+         'part_name'         => $partCell,
++        'item_part_rev'     => $partRevCell,
+         'txn_at'            => $dateCell,
+         'txn_qty'           => $qtyCell,
+         'template_name'     => $r['template_name']
