@@ -740,6 +740,38 @@ if (!function_exists('inv_held_location_codes_sql')) {
 }
 
 /**
+ * Location codes that must never be hand-picked as a source / consumption
+ * location in Shipment and Process inventory. This is the held set
+ * (LOC-LIP / LOC-SMP) plus LOC-QCH (Quality Check Hold): QCH stock is parked
+ * pending inspection and released server-side on the inspection's approval,
+ * so an operator can never legitimately ship it or consume it in a build.
+ *
+ * Kept separate from inv_held_location_codes() on purpose — the held set also
+ * drives the "held_qty" stock-summary bucket in bom_views.php, which must keep
+ * counting QCH stock under its own (QCH) heading, not as held.
+ */
+if (!function_exists('inv_shipprocess_excluded_location_codes')) {
+    function inv_shipprocess_excluded_location_codes()
+    {
+        return array_merge(inv_held_location_codes(), ['LOC-QCH']);
+    }
+}
+
+/**
+ * SQL fragment "'LOC-LIP','LOC-SMP','LOC-QCH'" for use inside an IN(...) clause.
+ * Codes are constants, never user input, but addslashes() defensively to match
+ * the surrounding style.
+ */
+if (!function_exists('inv_shipprocess_excluded_location_codes_sql')) {
+    function inv_shipprocess_excluded_location_codes_sql()
+    {
+        return "'" . implode("','", array_map(function ($c) {
+            return addslashes($c);
+        }, inv_shipprocess_excluded_location_codes())) . "'";
+    }
+}
+
+/**
  * Validate that a password is "hard" enough to be accepted.
  *
  * Policy:

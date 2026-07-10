@@ -385,7 +385,9 @@ function po_render_print_html($poId, array $opts = [])
                 $qty   = (float)($l['qty_planned'] ?? 0);
                 $qtyDisp = rtrim(rtrim(number_format($qty, 3, '.', ''), '0'), '.');
                 if ($qtyDisp === '' || $qtyDisp === '.') $qtyDisp = '0';
+                // Total value = Qty × Rate, plus GST% on that amount.
                 $totalLine = ($price !== null) ? $price * $qty : null;
+                if ($totalLine !== null && $gst !== null) $totalLine += $totalLine * ($gst / 100);
                 if ($totalLine !== null) $grandTotal += $totalLine;
                 $delivDate = '';
                 if (!empty($l['delivery_date'])) {

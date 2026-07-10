@@ -1922,7 +1922,7 @@ DROP TABLE IF EXISTS `notes`;
 /*!40101 SET character_set_client = utf8 */;
 CREATE TABLE `notes` (
   `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
-  `entity_type` enum('asset','asset_txn','inv_item','inv_txn','inspection','inspection_template','document') DEFAULT NULL,
+  `entity_type` enum('asset','asset_txn','inv_item','inv_txn','inspection','inspection_template','document','shiprcpt','shr_line') DEFAULT NULL,
   `entity_id` int(10) unsigned NOT NULL,
   `note_type_id` int(10) unsigned DEFAULT NULL,
   `body_html` text NOT NULL,

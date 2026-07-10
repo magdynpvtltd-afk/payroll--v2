@@ -1266,6 +1266,40 @@ if ($action === 'txn_save') {
         [$newLocation, $newVendor, $newUser, $newStatus, $dueDate, $assetId]
     );
 
+    // Keep the Ship/Receipt module in sync. Checking an asset in from a
+    // vendor here is the same physical event as recording its receipt on a
+    // shipment: close the oldest still-open asset receive line for this
+    // asset (qty_received := qty_planned) so it stops showing as "pending"
+    // in the shipment list. Mirrors what the shipment "Record a receipt"
+    // flow already does; asset receive lines carry no inv_receipts row, so
+    // stamping qty_received is all that's needed. Guarded + best-effort:
+    // a missing/locked line must never block the asset check-in itself.
+    if ($type === 'receive_vendor') {
+        try {
+            $openLine = db_one(
+                "SELECT sl.id
+                   FROM inv_shipment_lines sl
+                   JOIN inv_shipments sh ON sh.id = sl.shipment_id
+                  WHERE sl.asset_id = ?
+                    AND sl.entity_type = 'asset'
+                    AND sl.line_kind = 'receive'
+                    AND sl.qty_planned > sl.qty_received
+                    AND sh.status <> 'cancelled'
+                  ORDER BY sl.id
+                  LIMIT 1",
+                [$assetId]
+            );
+            if ($openLine) {
+                db_exec(
+                    'UPDATE inv_shipment_lines SET qty_received = qty_planned WHERE id = ?',
+                    [(int)$openLine['id']]
+                );
+            }
+        } catch (\Throwable $e) {
+            error_log('[asset txn_save] shipment receive-line sync skipped: ' . $e->getMessage());
+        }
+    }
+
     flash_set('success', 'Transaction recorded for ' . $a['asset_tag'] . '.');
     redirect($redirectTo === 'list'
         ? url('/asset.php?action=list')

@@ -57,6 +57,7 @@ require_once __DIR__ . '/includes/_qc.php';
 require_once __DIR__ . '/includes/_purchase_orders.php';   // Phase C — auto-PO on save
 require_once __DIR__ . '/includes/_asset_txn.php';         // Phase C — asset send/receive on ship/receive
 require_once __DIR__ . '/includes/_invoice_links.php';
+require_once __DIR__ . '/includes/_notes.php';             // Running notes (composer + attachments) on shipments
 
 $action    = (string)input('action', 'index');
 $canManage = permission_check('inventory_shiprcpt', 'manage');
@@ -72,6 +73,74 @@ function shr_modes_with_receive() { return ['receive', 'both']; }
  *  the header + line items become read-only for everything except
  *  the structured ship/receive event actions. */
 function shr_is_editable($status) { return $status === 'draft'; }
+
+/**
+ * Post the ship-out for a single ship line and stamp qty_shipped =
+ * qty_planned. inv_item lines move stock out of their source
+ * location(s); asset lines record a send_vendor txn; pending-name
+ * lines describe an expected receipt and move no stock. The caller
+ * must already be inside a DB transaction.
+ *
+ * Lines already fully shipped (qty_shipped >= qty_planned) are skipped
+ * and return false, so the approve-time auto-ship of due lines and the
+ * later manual Ship action can overlap without double-posting.
+ *
+ * @return bool true if this call shipped the line, false if skipped.
+ */
+function shr_post_ship_line(array $L, array $sh, string $actualShipDate, int $uid)
+{
+    if ((float)$L['qty_planned'] > 0 && (float)($L['qty_shipped'] ?? 0) >= (float)$L['qty_planned']) {
+        return false;   // already shipped — nothing to move
+    }
+    // Event date is the line's own "Before date" when set; otherwise the
+    // ship date supplied by the caller (manual Ship action / today).
+    $shipDate = !empty($L['before_date']) ? (string)$L['before_date'] : $actualShipDate;
+    $entity = $L['entity_type'] ?? 'inv_item';
+    if ($entity === 'asset') {
+        // Ship an asset = send_vendor transaction. No inventory ledger
+        // movement because the asset isn't tracked in inv_txns.
+        if (!empty($L['asset_id'])) {
+            asset_txn_record(
+                (int)$L['asset_id'],
+                'send_vendor',
+                ['to_vendor_id' => (int)$sh['vendor_id']],
+                $uid,
+                'Auto: shipped via ' . $sh['ship_no']
+            );
+        }
+    } elseif (!empty($L['item_id'])) {
+        // A line can be split across several source locations; post one
+        // ship_out per source row. Legacy lines with no split rows fall
+        // back to the single src_location_id for the whole qty.
+        $srcRows = db_all(
+            'SELECT location_id, qty FROM inv_shipment_line_sources
+              WHERE shipment_line_id = ? ORDER BY id',
+            [(int)$L['id']]
+        );
+        if (empty($srcRows)) {
+            $srcRows = [['location_id' => (int)$L['src_location_id'], 'qty' => (float)$L['qty_planned']]];
+        }
+        foreach ($srcRows as $sr) {
+            inv_post_txn(
+                'ship_out',
+                $shipDate,
+                (int)$L['item_id'],
+                (int)$sr['location_id'],
+                -1 * (float)$sr['qty'],
+                null,
+                $sh['ref_doc'] ?: null,
+                'Ship-out for ' . $sh['ship_no']
+            );
+        }
+    }
+    // Pending-name lines on the ship side ship nothing — the stamp below
+    // still records intent so the row reads as handled.
+    db_exec(
+        'UPDATE inv_shipment_lines SET qty_shipped = qty_planned WHERE id = ?',
+        [(int)$L['id']]
+    );
+    return true;
+}
 
 /** Generate the next ship_no. Delegates to the central code_next()
  *  helper which reads format settings from the code_sequences admin
@@ -240,6 +309,77 @@ function shr_shipment_ids_with_txn_notes()
     return array_map(function ($r) { return (int)$r['shipment_id']; }, $rows);
 }
 
+// ----------------------------------------------------------------
+// SHIPMENT-LINE-level legacy-note rollup
+// ----------------------------------------------------------------
+// Same legacy chain as above, but pivoted to the individual shipment LINE
+// (inv_shipment_lines.id) instead of the whole shipment — so the list's
+// Notes/Attachments column lights up only on the specific transaction line
+// the legacy note belongs to, not every row of the shipment.
+// ----------------------------------------------------------------
+
+/** Distinct shipment-LINE ids that carry at least one legacy running note.
+ *  Seeds the per-line Available/Not-available list filter. Flat int array. */
+function shr_line_ids_with_txn_notes()
+{
+    $rows = db_all("SELECT DISTINCT sl.id " . _shr_txn_notes_join());
+    return array_map(function ($r) { return (int)$r['id']; }, $rows);
+}
+
+/** Batched legacy-note counts for a set of shipment LINES.
+ *  Returns [shipment_line_id => count]; lines with none are absent. */
+function shr_line_txn_note_counts(array $lineIds)
+{
+    $ids = array_filter(array_unique(array_map('intval', $lineIds)), function ($v) { return $v > 0; });
+    if (empty($ids)) return [];
+    $in = implode(',', $ids);
+    $rows = db_all(
+        "SELECT sl.id AS line_id, COUNT(DISTINCT n.id) AS c
+         " . _shr_txn_notes_join() . "
+           AND sl.id IN ($in)
+         GROUP BY sl.id"
+    );
+    $out = [];
+    foreach ($rows as $r) $out[(int)$r['line_id']] = (int)$r['c'];
+    return $out;
+}
+
+/** Legacy running notes for ONE shipment line, newest first. Same shape as
+ *  shr_shipment_txn_notes() (each note carries its attachments). */
+function shr_line_txn_notes($lineId)
+{
+    $lineId = (int)$lineId;
+    $notes = db_all(
+        "SELECT DISTINCT n.id, n.body_html, n.created_at, n.entity_id AS inv_txn_id,
+                o.old_id AS old_transaction_id,
+                u.full_name AS author_name, u.email AS author_email,
+                c.name AS note_type_name
+           FROM notes n
+           JOIN inv_txns t            ON t.id = n.entity_id
+           JOIN old_inv_txns o        ON o.old_id = CAST(SUBSTRING(t.ref_doc, 9) AS UNSIGNED)
+           JOIN inv_shipment_lines sl ON sl.old_transaction_id = o.old_id
+      LEFT JOIN users u               ON u.id = n.author_id
+      LEFT JOIN categories c          ON c.id = n.note_type_id
+          WHERE n.entity_type = 'inv_txn' AND n.is_deleted = 0
+            AND t.ref_doc LIKE 'OLD-ITX-%'
+            AND sl.id = ?
+          ORDER BY n.created_at DESC, n.id DESC",
+        [$lineId]
+    );
+    $attByNote = [];
+    if ($notes) {
+        $in = implode(',', array_map('intval', array_column($notes, 'id')));
+        foreach (db_all("SELECT id, note_id, filename FROM note_attachments WHERE note_id IN ($in) ORDER BY note_id, id") as $a) {
+            $attByNote[(int)$a['note_id']][] = ['id' => (int)$a['id'], 'filename' => (string)$a['filename']];
+        }
+    }
+    foreach ($notes as &$n) {
+        $n['attachments'] = $attByNote[(int)$n['id']] ?? [];
+    }
+    unset($n);
+    return $notes;
+}
+
 /** Full list of running notes rolled up to one shipment, newest first.
  *  Each note carries its attachments as ['id'=>.., 'filename'=>..]. */
 function shr_shipment_txn_notes($shipmentId)
@@ -388,10 +528,16 @@ function shr_txn_notes_popup_assets()
             e.preventDefault();
             e.stopPropagation();
             var sid    = btn.getAttribute('data-shipment-id');
+            var lineId = btn.getAttribute('data-line-id') || '';
             var shipNo = btn.getAttribute('data-ship-no') || '';
             render(shipNo, []);
             pop.querySelector('.shrnotes-body').innerHTML = '<div class="shrnotes-empty">Loading…</div>';
-            var url = base + '/inventory_shiprcpt.php?action=txn_notes&id=' + encodeURIComponent(sid);
+            // Prefer the per-line endpoint (data-line-id) so the popup shows
+            // only the legacy notes for THIS transaction line; fall back to the
+            // whole-shipment rollup for any legacy caller without a line id.
+            var url = base + '/inventory_shiprcpt.php?action=txn_notes&'
+                    + (lineId ? 'line_id=' + encodeURIComponent(lineId)
+                              : 'id=' + encodeURIComponent(sid));
             fetch(url, { credentials: 'same-origin' })
                 .then(function (r) { return r.json(); })
                 .then(function (list) { render(shipNo, Array.isArray(list) ? list : []); })
@@ -444,9 +590,17 @@ if ($action === 'vendor_data') {
 // ----------------------------------------------------------------
 if ($action === 'txn_notes') {
     header('Content-Type: application/json; charset=utf-8');
-    $id = (int)input('id', 0);
-    if ($id <= 0) { echo json_encode([]); exit; }
-    $notes = shr_shipment_txn_notes($id);
+    // line_id (preferred) returns the legacy notes for ONE transaction line;
+    // id (legacy callers) returns them rolled up to the whole shipment.
+    $lineId = (int)input('line_id', 0);
+    $id     = (int)input('id', 0);
+    if ($lineId > 0) {
+        $notes = shr_line_txn_notes($lineId);
+    } elseif ($id > 0) {
+        $notes = shr_shipment_txn_notes($id);
+    } else {
+        echo json_encode([]); exit;
+    }
     $out = array_map(function ($n) {
         return [
             'id'          => (int)$n['id'],
@@ -877,9 +1031,10 @@ if ($action === 'bom_for_receive_item') {
     $stockByItem = [];
     if (!empty($childIds)) {
         $placeholders = implode(',', array_fill(0, count($childIds), '?'));
-        // Held locations (LOC-LIP / LOC-SMP) are excluded — their stock is
-        // tracked but can never be shipped, only added to or moved.
-        $heldInList = inv_held_location_codes_sql();
+        // Held locations (LOC-LIP / LOC-SMP) and LOC-QCH (Quality Check Hold)
+        // are excluded — their stock is tracked but can never be shipped, only
+        // added to or moved / released server-side.
+        $heldInList = inv_shipprocess_excluded_location_codes_sql();
         $stockRows = db_all(
             "SELECT s.item_id, s.location_id, s.qty, l.name AS loc_name, l.code AS loc_code
                FROM inv_item_location_stock s
@@ -941,9 +1096,10 @@ if ($action === 'stock_by_location') {
         echo json_encode(['ok' => false, 'reason' => 'Missing item_id']);
         exit;
     }
-    // Held locations (LOC-LIP / LOC-SMP) are excluded — their stock can
-    // never be shipped, only added to or moved.
-    $heldInList = inv_held_location_codes_sql();
+    // Held locations (LOC-LIP / LOC-SMP) and LOC-QCH (Quality Check Hold) are
+    // excluded — their stock can never be shipped, only added to or moved /
+    // released server-side.
+    $heldInList = inv_shipprocess_excluded_location_codes_sql();
     $rows = db_all(
         "SELECT l.id, l.name, l.code, s.qty
            FROM inv_item_location_stock s
@@ -1195,6 +1351,15 @@ if ($action === 'save') {
     $uid = (int)current_user_id();
     $isNew = ($id === 0);
 
+    // Where a save failure redirects back to: the amend form for an amendment
+    // (the edit form is locked for past-draft shipments and would throw a
+    // second, misleading "past draft and cannot be edited" error), otherwise
+    // the normal new/edit form. Defined before the transaction so the catch
+    // handler can reference it even if the header write throws.
+    $backAction = $isNew
+        ? 'new'
+        : (($isAmendingSave ? 'amend' : 'edit') . '&id=' . $id);
+
     // Phase D1 — snapshot the CURRENT lines BEFORE the transaction
     // modifies them. Passed to po_create_amendment_for_shipment() after
     // the commit so the historical PO version shows the OLD values, not
@@ -1320,16 +1485,32 @@ if ($action === 'save') {
         // Step 1 — validate + build a $specs list. Same gates as
         // before; bad rows still bail out via redirect.
         // ------------------------------------------------------------
-        // Held locations (LOC-LIP / LOC-SMP) can never be a ship source —
-        // their stock is add/move only. Resolve their ids once for the
-        // per-line guard below (the Source picker already omits them; this
-        // defends against a hand-crafted POST).
+        // Held locations (LOC-LIP / LOC-SMP) and LOC-QCH (Quality Check Hold)
+        // can never be a ship source — their stock is add/move only (QCH is
+        // released server-side on inspection approval). Resolve their ids once
+        // for the per-line guard below (the Source picker already omits them;
+        // this defends against a hand-crafted POST).
         $heldLocIds = [];
-        $heldInList = inv_held_location_codes_sql();
+        $heldInList = inv_shipprocess_excluded_location_codes_sql();
         foreach (db_all(
             "SELECT id FROM locations WHERE code COLLATE utf8mb4_unicode_ci IN ($heldInList)"
         ) as $hr) {
             $heldLocIds[(int)$hr['id']] = true;
+        }
+
+        // Already-shipped ship lines are immutable history. On an amendment
+        // Step 2 leaves them untouched (see the qty_shipped>0 branch below),
+        // so Step 1 must NOT re-validate them against today's rules: their
+        // source stock has already moved out (would fail the stock check) and
+        // a source that was valid when shipped may now be excluded (e.g. an
+        // old LOC-QCH source after the ship/process exclusion broadened) —
+        // either would wrongly block a receipt-only amendment. Map the shipped
+        // line ids up front so the ship-source guards can skip them.
+        $shippedQtyByLineId = [];
+        if ($isAmendingSave && $id > 0) {
+            foreach (db_all('SELECT id, qty_shipped FROM inv_shipment_lines WHERE shipment_id = ?', [$id]) as $r) {
+                $shippedQtyByLineId[(int)$r['id']] = (float)$r['qty_shipped'];
+            }
         }
 
         $specs = [];
@@ -1378,12 +1559,18 @@ if ($action === 'save') {
             if (!in_array($kind, ['ship', 'receive'], true)) continue;
             if ($mode === 'ship'    && $kind !== 'ship')    continue;
             if ($mode === 'receive' && $kind !== 'receive') continue;
-            if ($kind === 'ship' && $entity === 'inv_item' && $itemId > 0) {
+            // Skip ship-source validation for an already-shipped line on an
+            // amendment: it is left untouched in Step 2, so re-checking its
+            // (now-moved-out / possibly-excluded) source is both pointless and
+            // wrong — it would block unrelated receipt-only amendments.
+            $alreadyShipped = $isAmendingSave && $lid > 0
+                && (($shippedQtyByLineId[$lid] ?? 0) > 0);
+            if ($kind === 'ship' && $entity === 'inv_item' && $itemId > 0 && !$alreadyShipped) {
                 // At least one source.
                 if (!$srcEntries) {
                     db()->rollBack();
                     flash_set('error', 'Each ship line for an inventory item needs at least one source location.');
-                    redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+                    redirect(url('/inventory_shiprcpt.php?action=' . $backAction));
                 }
                 // Sources must allocate exactly the line quantity.
                 $alloc = 0.0;
@@ -1393,7 +1580,7 @@ if ($action === 'save') {
                     flash_set('error', sprintf(
                         'Ship line sources must sum to the line quantity (need %g, allocated %g) for item #%d.',
                         $qty, $alloc, $itemId));
-                    redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+                    redirect(url('/inventory_shiprcpt.php?action=' . $backAction));
                 }
                 // Held locations may never be a ship source.
                 foreach ($srcEntries as $e) {
@@ -1401,7 +1588,7 @@ if ($action === 'save') {
                         db()->rollBack();
                         flash_set('error', 'Held stock (Lost In Process / Sample) cannot be shipped. '
                             . 'Move it to an available location first.');
-                        redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+                        redirect(url('/inventory_shiprcpt.php?action=' . $backAction));
                     }
                 }
                 // Each source location must hold enough stock. Aggregate by
@@ -1419,7 +1606,7 @@ if ($action === 'save') {
                             flash_set('error', sprintf(
                                 'Source location #%d has only %g of item #%d (need %g).',
                                 $eLoc, $have, $itemId, $eQty));
-                            redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+                            redirect(url('/inventory_shiprcpt.php?action=' . $backAction));
                         }
                     }
                 } catch (\Throwable $sve) {
@@ -1449,7 +1636,7 @@ if ($action === 'save') {
         if (empty($specs)) {
             db()->rollBack();
             flash_set('error', 'Add at least one line item before saving.');
-            redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+            redirect(url('/inventory_shiprcpt.php?action=' . $backAction));
         }
 
         // ------------------------------------------------------------
@@ -1502,6 +1689,14 @@ if ($action === 'save') {
             // UPDATE / INSERT
             foreach ($specs as $s) {
                 if ($s['line_id'] > 0 && isset($existingIds[$s['line_id']])) {
+                    // Already-shipped ship line — its qty/source/etc. are the
+                    // historical shipment record. Leave the row untouched even
+                    // if the form posted stale values (the source now reports 0
+                    // stock). This mirrors the locked, read-only UI.
+                    if ((float)$existingIds[$s['line_id']] > 0) {
+                        $written++;
+                        continue;
+                    }
                     db_exec(
                         'UPDATE inv_shipment_lines
                             SET sort_order = ?, line_kind = ?, entity_type = ?,
@@ -1581,7 +1776,7 @@ if ($action === 'save') {
     } catch (\Throwable $e) {
         if (db()->inTransaction()) db()->rollBack();
         flash_set('error', 'Could not save shipment: ' . $e->getMessage());
-        redirect(url('/inventory_shiprcpt.php?action=' . ($isNew ? 'new' : 'edit&id=' . $id)));
+        redirect(url('/inventory_shiprcpt.php?action=' . $backAction));
     }
 
     db_exec(
@@ -1642,7 +1837,65 @@ if ($action === 'approve') {
         "INSERT INTO audit_log (actor_id, action, target_id, details) VALUES (?, 'shiprcpt.approve', ?, ?)",
         [$uid, $id, $sh['ship_no']]
     );
-    flash_set('success', 'Shipment approved.');
+
+    // ------------------------------------------------------------
+    // Auto-ship due lines. On approval, any ship line whose "Before
+    // date" is today or in the past is shipped immediately (stock
+    // moves out now). Lines dated in the future — and lines with no
+    // Before date — are left for the manual Ship action. Only fires
+    // for shipments that have a ship side.
+    // ------------------------------------------------------------
+    $autoShipped = 0;
+    if (in_array($sh['mode'], shr_modes_with_ship(), true)) {
+        $today = date('Y-m-d');
+        $dueLines = db_all(
+            "SELECT * FROM inv_shipment_lines
+              WHERE shipment_id = ? AND line_kind = 'ship'
+                AND before_date IS NOT NULL AND before_date <= ?
+              ORDER BY sort_order, id",
+            [$id, $today]
+        );
+        if ($dueLines) {
+            try {
+                db()->beginTransaction();
+                foreach ($dueLines as $L) {
+                    if (shr_post_ship_line($L, $sh, $today, $uid)) $autoShipped++;
+                }
+                // Flip the header to 'shipped' only when every ship line is
+                // now shipped; otherwise keep it 'approved' so the operator
+                // can ship the remaining future-dated lines when due.
+                $unshipped = (int)db_val(
+                    "SELECT COUNT(*) FROM inv_shipment_lines
+                      WHERE shipment_id = ? AND line_kind = 'ship'
+                        AND qty_shipped < qty_planned",
+                    [$id], 0
+                );
+                if ($autoShipped > 0 && $unshipped === 0) {
+                    db_exec(
+                        'UPDATE inv_shipments
+                            SET status = ?, shipped_by = ?, shipped_at = NOW(), actual_ship_date = ?
+                          WHERE id = ?',
+                        ['shipped', $uid, $today, $id]
+                    );
+                }
+                db()->commit();
+                if ($autoShipped > 0) {
+                    db_exec(
+                        "INSERT INTO audit_log (actor_id, action, target_id, details) VALUES (?, 'shiprcpt.ship', ?, ?)",
+                        [$uid, $id, $sh['ship_no'] . " — auto-shipped $autoShipped due line(s) on " . $today]
+                    );
+                }
+            } catch (\Throwable $e) {
+                if (db()->inTransaction()) db()->rollBack();
+                error_log('[shiprcpt approve] auto-ship failed: ' . $e->getMessage());
+                $autoShipped = 0;
+            }
+        }
+    }
+
+    flash_set('success', $autoShipped > 0
+        ? "Shipment approved. $autoShipped due line(s) shipped automatically."
+        : 'Shipment approved.');
     redirect(url('/inventory_shiprcpt.php?action=view&id=' . $id));
 }
 
@@ -1681,52 +1934,10 @@ if ($action === 'ship') {
     try {
         db()->beginTransaction();
         foreach ($shipLines as $L) {
-            $entity = $L['entity_type'] ?? 'inv_item';
-            if ($entity === 'asset') {
-                // Phase C — ship an asset = send_vendor transaction.
-                // No inventory ledger movement because the asset isn't
-                // tracked in inv_txns. Just write the audit row.
-                if (!empty($L['asset_id'])) {
-                    asset_txn_record(
-                        (int)$L['asset_id'],
-                        'send_vendor',
-                        ['to_vendor_id' => (int)$sh['vendor_id']],
-                        $uid,
-                        'Auto: shipped via ' . $sh['ship_no']
-                    );
-                }
-            } elseif (!empty($L['item_id'])) {
-                // Regular inv_item ship line — post the ledger txn(s). A line
-                // can be split across several source locations; post one
-                // ship_out per source row. Legacy lines with no split rows
-                // fall back to the single src_location_id for the whole qty.
-                $srcRows = db_all(
-                    'SELECT location_id, qty FROM inv_shipment_line_sources
-                      WHERE shipment_line_id = ? ORDER BY id',
-                    [(int)$L['id']]
-                );
-                if (empty($srcRows)) {
-                    $srcRows = [['location_id' => (int)$L['src_location_id'], 'qty' => (float)$L['qty_planned']]];
-                }
-                foreach ($srcRows as $sr) {
-                    inv_post_txn(
-                        'ship_out',
-                        $actualShipDate,
-                        (int)$L['item_id'],
-                        (int)$sr['location_id'],
-                        -1 * (float)$sr['qty'],
-                        null,
-                        $sh['ref_doc'] ?: null,
-                        'Ship-out for ' . $sh['ship_no']
-                    );
-                }
-            }
-            // Pending-name lines on the ship side don't ship anything
-            // — they describe an expected receipt. Skip them safely.
-            db_exec(
-                'UPDATE inv_shipment_lines SET qty_shipped = qty_planned WHERE id = ?',
-                [(int)$L['id']]
-            );
+            // Ships each line; lines already auto-shipped at approval
+            // (before_date due) are skipped inside the helper, so this
+            // manual Ship only posts the remaining (future-dated) lines.
+            shr_post_ship_line($L, $sh, $actualShipDate, $uid);
         }
         db_exec(
             'UPDATE inv_shipments
@@ -2565,6 +2776,19 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
                 border-top: 1px solid var(--border);
             }
             .shr-section-label:first-of-type { border-top: none; margin-top: 6px; }
+            /* Already-shipped ship line — locked, not editable. */
+            tr.shr-line-shipped { opacity: 0.9; background: var(--surface-alt, #f7f7f8); }
+            tr.shr-line-shipped input,
+            tr.shr-line-shipped select,
+            tr.shr-line-shipped .cb-wrap,
+            tr.shr-line-shipped .shr-src-widget,
+            tr.shr-line-shipped .shr-line-remove { pointer-events: none; }
+            tr.shr-line-shipped .shr-line-remove { opacity: 0.4; }
+            .shr-shipped-badge {
+                display: inline-block; margin-top: 4px;
+                font-size: 10px; font-weight: 700; text-transform: uppercase;
+                letter-spacing: 0.04em; color: var(--success, #1e7b30);
+            }
         </style>
 
         <?php foreach ([
@@ -2638,8 +2862,14 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
                         $lSrcEntries = [['loc' => $lSrc, 'qty' => (float)$L['qty_planned']]];
                     }
                 }
+                // A ship line that has already moved stock (qty_shipped > 0)
+                // is historical fact — its source picks now report 0 stock and
+                // must not be re-validated or re-saved. Lock the row.
+                $lShipped = ($secKind === 'ship' && $isExisting
+                             && (float)($L['qty_shipped'] ?? 0) > 0);
             ?>
-                <tr class="shr-line-row" data-subtype="<?= h($lSubType) ?>">
+                <tr class="shr-line-row<?= $lShipped ? ' shr-line-shipped' : '' ?>"
+                    data-subtype="<?= h($lSubType) ?>"<?= $lShipped ? ' data-shipped="1"' : '' ?>>
                     <!-- line_id[] for UPDATE/INSERT/DELETE diff on amendment. 0 = new row. -->
                     <input type="hidden" name="line_id[]"   value="<?= (int)$lLineId ?>">
                     <!-- kind is fixed per section — hidden input, not a dropdown -->
@@ -2955,6 +3185,15 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
                 });
             });
             recomputeSrc(row);
+            // Locked (already-shipped) rows: disable the interactive source
+            // controls. These are internal to the widget — the submitted value
+            // lives in the row's .shr-src-json hidden input, which we leave as
+            // saved, so disabling here can't misalign the parallel arrays.
+            if (row._srcLocked) {
+                widget.querySelectorAll('select, input, button').forEach(function (el) {
+                    el.disabled = true;
+                });
+            }
         }
 
         // In-place status recompute — focus-safe so typing a qty doesn't
@@ -2964,6 +3203,15 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
             if (!widget) return;
             var statusEl = widget.querySelector('.shr-src-status');
             if (!statusEl) return;
+            // Already-shipped lines are locked: their sources reflect what was
+            // shipped, not current stock, so never flag them as over/short and
+            // always pass the submit gate.
+            if (row._srcLocked) {
+                row._srcOk = true;
+                statusEl.className = 'shr-src-status small muted';
+                statusEl.textContent = 'shipped — locked';
+                return;
+            }
             var availByLoc = {};
             (row._srcLocs || []).forEach(function (l) { availByLoc[l.id] = l.qty; });
             var entries = readSrcEntries(row);
@@ -3007,9 +3255,32 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
         // Retained hook — the widget manages its own state now.
         function syncRow(row) { /* no-op: kept for call sites */ }
 
+        // Lock an already-shipped ship row so the shipped entry can't change.
+        // Text inputs go readonly (so they still POST and keep the parallel
+        // arrays aligned); pointer-events are killed via the CSS class. The
+        // server also refuses to rewrite a shipped line, so this is UX only.
+        function lockShippedRow(row) {
+            row._srcLocked = true;
+            row.querySelectorAll('input, textarea').forEach(function (inp) {
+                inp.readOnly = true;
+            });
+            var rm = row.querySelector('.shr-line-remove');
+            if (rm) { rm.disabled = true; rm.title = 'Already shipped — cannot remove'; }
+            var typeCell = row.querySelector('td');
+            if (typeCell && !typeCell.querySelector('.shr-shipped-badge')) {
+                var badge = document.createElement('span');
+                badge.className = 'shr-shipped-badge';
+                badge.textContent = 'shipped';
+                typeCell.appendChild(badge);
+            }
+        }
+
         function wireRow(row) {
             if (row._wired) return;
             row._wired = true;
+            // Flag locked BEFORE the source widget builds so it renders
+            // read-only and skips the over/short validation.
+            if (row.getAttribute('data-shipped') === '1') lockShippedRow(row);
             syncRow(row);
 
             // Build the multi-location source widget for ship rows. New rows
@@ -3921,11 +4192,18 @@ if ($action === 'view') {
                         <th class="r">Received</th>
                         <th>Source</th>
                         <th class="r">Txn ID</th>
-                        <th>Notes</th>
+                        <th>Notes / Attachments</th>
                     </tr>
                 </thead>
                 <tbody>
-                <?php foreach ($lines as $L):
+                <?php
+                // Per-line note counts for this shipment's lines (one batched
+                // query each): new composer notes + imported legacy notes.
+                $viewLineIds      = array_map(function ($L) { return (int)$L['id']; }, $lines);
+                $viewNewCounts    = function_exists('notes_counts_for') ? notes_counts_for('shr_line', $viewLineIds) : [];
+                $viewLegacyCounts = shr_line_txn_note_counts($viewLineIds);
+                $canManageShr     = $canManage; // page-level inventory_shiprcpt.manage
+                foreach ($lines as $L):
                     $kindBadge = $L['line_kind'] === 'ship'
                         ? '<span class="pill pill-info">ship</span>'
                         : '<span class="pill pill-neutral">receive</span>';
@@ -3998,12 +4276,34 @@ if ($action === 'view') {
                                 <span class="muted">—</span>
                             <?php endif; ?>
                         </td>
-                        <td class="muted small"><?= h($L['notes'] ?: '') ?></td>
+                        <td class="muted small">
+                            <?php
+                            $lid      = (int)$L['id'];
+                            $nCount   = (int)($viewNewCounts[$lid] ?? 0);
+                            $lCount   = (int)($viewLegacyCounts[$lid] ?? 0);
+                            $btnStyle = 'background:none;border:none;padding:0;cursor:pointer;font:inherit;line-height:1;white-space:nowrap;color:#1d4ed8;';
+                            if ($canManageShr || $nCount > 0):
+                                $badge = $nCount > 0 ? '&nbsp;<span style="font-weight:700;">' . $nCount . '</span>' : '';
+                            ?>
+                                <button type="button" class="notes-popup-btn" style="<?= $btnStyle ?>"
+                                        data-entity-type="shr_line" data-entity-id="<?= $lid ?>"
+                                        title="<?= $canManageShr ? 'View / add notes &amp; attachments for this line' : 'View notes for this line' ?>">📝<?= $badge ?></button>
+                            <?php endif; ?>
+                            <?php if ($lCount > 0): ?>
+                                <button type="button" class="shr-notes-indicator"
+                                        data-line-id="<?= $lid ?>" data-ship-no="<?= h($sh['ship_no']) ?>"
+                                        title="<?= $lCount ?> imported note<?= $lCount === 1 ? '' : 's' ?> on this line">📎&nbsp;<span class="shr-notes-badge"><?= $lCount ?></span></button>
+                            <?php endif; ?>
+                            <?php if (!empty($L['notes'])): ?>
+                                <div style="margin-top:4px;"><?= h($L['notes']) ?></div>
+                            <?php endif; ?>
+                        </td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
             </table>
         <?php endif; ?>
+        <?php shr_txn_notes_popup_assets(); notes_popup_assets(); ?>
     </div>
 
     <!-- Receipts -->
@@ -4240,12 +4540,10 @@ if ($action === 'view') {
     <?php endif; ?>
 
     <?php
-    if (function_exists('notes_render')) {
-        notes_render('shiprcpt', $id, 'inline');
-    }
-    if (function_exists('notes_attachment_preview_assets')) {
-        notes_attachment_preview_assets();
-    }
+    // Running notes live PER LINE now (see the Line items table's
+    // Notes / Attachments column above, which uses the shr_line composer
+    // modal). notes_popup_assets() — emitted there — also wires the
+    // attachment-preview machinery, so no shipment-level notes section here.
     require __DIR__ . '/includes/footer.php';
     exit;
 }
@@ -4310,8 +4608,8 @@ $baseUnion = "
           v.code                               AS vendor_code,
           v.name                               AS vendor_name,
           i.id                                 AS item_id,
-          i.code                               AS item_code,
-          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name) AS item_name,
+          COALESCE(i.code, a.asset_tag)        AS item_code,
+          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name, am.name) AS item_name,
           r.qty_received                       AS qty,
           sl.qty_planned                       AS line_qty_planned,
           l.name                               AS location_name,
@@ -4327,11 +4625,14 @@ $baseUnion = "
           (SELECT po_no FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_no,
           (SELECT id    FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_id,
           sl.old_transaction_id                AS old_transaction_id,
+          sl.id                                AS shipment_line_id,
           r.txn_id                             AS inv_txn_id
         FROM inv_receipts r
         JOIN inv_shipments sh        ON sh.id = r.shipment_id
         JOIN inv_shipment_lines sl   ON sl.id = r.shipment_line_id
    LEFT JOIN inv_items i             ON i.id  = sl.item_id
+   LEFT JOIN assets    a             ON a.id  = sl.asset_id
+   LEFT JOIN asset_models am         ON am.id = a.model_id
    LEFT JOIN vendors v               ON v.id  = sh.vendor_id
    LEFT JOIN locations l             ON l.id  = r.dst_location_id
    LEFT JOIN users u                 ON u.id  = r.created_by
@@ -4342,7 +4643,10 @@ $baseUnion = "
       SELECT
           CONCAT('S', sl.id)                   AS event_uid,
           'ship_out'                           AS direction,
-          sh.actual_ship_date                  AS event_date,
+          -- Event date is the line before_date when set (matches the
+          -- ledger txn date stamped at ship time); else the header
+          -- actual_ship_date for lines shipped without a before_date.
+          COALESCE(sl.before_date, sh.actual_ship_date) AS event_date,
           sh.shipped_at                        AS event_at,
           NULL                                 AS receipt_id,
           sl.id                                AS ship_line_id,
@@ -4354,8 +4658,8 @@ $baseUnion = "
           v.code                               AS vendor_code,
           v.name                               AS vendor_name,
           i.id                                 AS item_id,
-          i.code                               AS item_code,
-          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name) AS item_name,
+          COALESCE(i.code, a.asset_tag)        AS item_code,
+          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name, am.name) AS item_name,
           sl.qty_shipped                       AS qty,
           sl.qty_planned                       AS line_qty_planned,
           l.name                               AS location_name,
@@ -4368,6 +4672,7 @@ $baseUnion = "
           (SELECT po_no FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_no,
           (SELECT id    FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_id,
           sl.old_transaction_id                AS old_transaction_id,
+          sl.id                                AS shipment_line_id,
           -- Ship-out txns aren't 1:1 with a ship line (a line can split
           -- across several source locations → several ship_out txns), so
           -- there's no single internal txn id to surface here.
@@ -4375,6 +4680,8 @@ $baseUnion = "
         FROM inv_shipment_lines sl
         JOIN inv_shipments sh        ON sh.id = sl.shipment_id
    LEFT JOIN inv_items i             ON i.id  = sl.item_id
+   LEFT JOIN assets    a             ON a.id  = sl.asset_id
+   LEFT JOIN asset_models am         ON am.id = a.model_id
    LEFT JOIN vendors v               ON v.id  = sh.vendor_id
    LEFT JOIN locations l             ON l.id  = sl.src_location_id
    LEFT JOIN users u                 ON u.id  = sh.shipped_by
@@ -4411,8 +4718,8 @@ $baseUnion = "
           v.code                               AS vendor_code,
           v.name                               AS vendor_name,
           sl.item_id                           AS item_id,
-          i.code                               AS item_code,
-          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name) AS item_name,
+          COALESCE(i.code, a.asset_tag)        AS item_code,
+          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name, am.name) AS item_name,
           NULL                                 AS qty,
           -- Show remaining (planned − received) so the planned row always
           -- reflects what is still outstanding, not the original total.
@@ -4427,10 +4734,13 @@ $baseUnion = "
           (SELECT po_no FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_no,
           (SELECT id    FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_id,
           sl.old_transaction_id                AS old_transaction_id,
+          sl.id                                AS shipment_line_id,
           NULL                                 AS inv_txn_id
         FROM inv_shipment_lines sl
         JOIN inv_shipments sh    ON sh.id = sl.shipment_id
    LEFT JOIN inv_items i         ON i.id  = sl.item_id
+   LEFT JOIN assets    a         ON a.id  = sl.asset_id
+   LEFT JOIN asset_models am     ON am.id = a.model_id
    LEFT JOIN vendors v           ON v.id  = sh.vendor_id
    LEFT JOIN users uc            ON uc.id = sh.created_by
        WHERE sh.status <> 'cancelled'
@@ -4472,8 +4782,8 @@ $baseUnion = "
           v.code                               AS vendor_code,
           v.name                               AS vendor_name,
           i.id                                 AS item_id,
-          i.code                               AS item_code,
-          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name) AS item_name,
+          COALESCE(i.code, a.asset_tag)        AS item_code,
+          COALESCE(NULLIF(i.short_description, ''), i.name, sl.pending_name, am.name) AS item_name,
           sl.qty_received                      AS qty,
           sl.qty_planned                       AS line_qty_planned,
           NULL                                 AS location_name,
@@ -4486,11 +4796,14 @@ $baseUnion = "
           (SELECT po_no FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_no,
           (SELECT id    FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_id,
           sl.old_transaction_id                AS old_transaction_id,
+          sl.id                                AS shipment_line_id,
           -- Imported received receipts are audit-only — no inv_txns row.
           NULL                                 AS inv_txn_id
         FROM inv_shipment_lines sl
         JOIN inv_shipments sh        ON sh.id = sl.shipment_id
    LEFT JOIN inv_items i             ON i.id  = sl.item_id
+   LEFT JOIN assets    a             ON a.id  = sl.asset_id
+   LEFT JOIN asset_models am         ON am.id = a.model_id
    LEFT JOIN vendors v               ON v.id  = sh.vendor_id
    LEFT JOIN users uc                ON uc.id = sh.created_by
        WHERE sl.line_kind  = 'receive'
@@ -4499,23 +4812,42 @@ $baseUnion = "
          AND NOT EXISTS (SELECT 1 FROM inv_receipts r3 WHERE r3.shipment_line_id = sl.id)
     ) AS e";
 
-// Boolean expression (1/0): does this event's shipment have any running
-// notes rolled up from its transactions? Drives the Notes/Attachments
-// column filter (Available / Not available). The set of note-bearing
-// shipment ids is resolved ONCE here and embedded as a literal integer
-// IN-list, so the per-row filter is a cheap indexed comparison — never a
-// correlated subquery (which, with the non-sargable CONCAT join, hangs
-// the page). Empty list falls back to IN (0) (matches nothing).
-$noteShipmentIds = shr_shipment_ids_with_txn_notes();
-$noteIdList   = !empty($noteShipmentIds) ? implode(',', $noteShipmentIds) : '0';
-$hasNotesExpr = "(CASE WHEN e.shipment_id IN ($noteIdList) THEN 1 ELSE 0 END)";
+// Boolean expression (1/0): does THIS transaction line carry any running
+// notes — legacy (imported inv_txn notes) OR new (shr_line composer notes)?
+// Drives the Notes/Attachments column filter (Available / Not available).
+// The note-bearing LINE ids are resolved ONCE here and embedded as a literal
+// integer IN-list, so the per-row filter is a cheap indexed comparison —
+// never a correlated subquery (which, with the non-sargable CONCAT join,
+// hangs the page). Empty list falls back to IN (0) (matches nothing).
+$noteLineIds = shr_line_ids_with_txn_notes();
+foreach (db_all("SELECT DISTINCT entity_id FROM notes WHERE entity_type = 'shr_line' AND is_deleted = 0") as $nr) {
+    $noteLineIds[] = (int)$nr['entity_id'];
+}
+$noteLineIds  = array_values(array_unique(array_filter(array_map('intval', $noteLineIds), function ($v) { return $v > 0; })));
+$noteIdList   = !empty($noteLineIds) ? implode(',', $noteLineIds) : '0';
+$hasNotesExpr = "(CASE WHEN e.shipment_line_id IN ($noteIdList) THEN 1 ELSE 0 END)";
 
 $dtCfg = [
     'id'       => 'shiprcpt_txn_history',
     'base_sql' => 'SELECT * FROM ' . $baseUnion,
+    // Default column layout (order + visibility). The first block is what
+    // ships visible, in this exact order: PO #, Ship, When, Event date,
+    // Vendor, Item, Qty, Direction, Status, Notes, Notes/Attachments,
+    // Actions. Everything after carries `default_hidden => true` — still
+    // listed in the ⚙ Columns panel so users can un-hide them, just not
+    // shown out of the box.
     'columns'  => [
+        ['key'=>'po_no',         'label'=>'PO #',         'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.po_no'],
+        ['key'=>'ship_no',       'label'=>'Ship #',       'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.ship_no'],
         ['key'=>'event_at',      'label'=>'When',         'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.event_at',  'td_class'=>'nowrap'],
         ['key'=>'event_date',    'label'=>'Event date',   'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.event_date'],
+        ['key'=>'vendor',        'label'=>'Vendor',       'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.vendor_name'],
+        ['key'=>'item_label',    'label'=>'Item',         'sortable'=>true, 'searchable'=>true,
+         // Searchable on both code and name; displayed as (CODE)-Name
+         // per the app-wide convention. Use COALESCE so the planned
+         // branch (NULL code) doesn't blow up the CONCAT result.
+         'sql_col'=>"CONCAT('(', COALESCE(e.item_code,''), ')-', COALESCE(e.item_name,''))"],
+        ['key'=>'qty',           'label'=>'Qty',          'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.qty',          'th_class'=>'r','td_class'=>'r'],
         ['key'=>'direction',     'label'=>'Direction',    'sortable'=>true, 'sql_col'=>'e.direction',
          'filter' => ['type'=>'select','placeholder'=>'all','options'=>[
              ['value'=>'receive',  'label'=>'Receipt (incoming)'],
@@ -4531,34 +4863,6 @@ $dtCfg = [
              ['value'=>'closed',    'label'=>'Closed'],
              ['value'=>'cancelled', 'label'=>'Cancelled'],
          ]]],
-        ['key'=>'sh_mode',       'label'=>'Mode',         'sortable'=>true, 'sql_col'=>'e.sh_mode',
-         'filter' => ['type'=>'select','placeholder'=>'all','options'=>[
-             ['value'=>'receive', 'label'=>'Receive only'],
-             ['value'=>'ship',    'label'=>'Ship only'],
-             ['value'=>'both',    'label'=>'Both'],
-         ]]],
-        ['key'=>'ship_no',       'label'=>'Ship #',       'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.ship_no'],
-        ['key'=>'po_no',         'label'=>'PO #',         'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.po_no'],
-        ['key'=>'old_txn',       'label'=>'Txn ID',       'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.old_transaction_id', 'th_class'=>'r','td_class'=>'r'],
-        // Internal transaction id — the same "Txn ID" shown on the
-        // Transaction history page (inv_txns.id). Only receipt events are
-        // 1:1 with an inv_txns row (via inv_receipts.txn_id); other rows
-        // show "—".
-        ['key'=>'inv_txn_id',    'label'=>'Internal Txn ID', 'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.inv_txn_id', 'th_class'=>'r','td_class'=>'r'],
-        ['key'=>'vendor',        'label'=>'Vendor',       'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.vendor_name'],
-        ['key'=>'item_label',    'label'=>'Item',         'sortable'=>true, 'searchable'=>true,
-         // Searchable on both code and name; displayed as (CODE)-Name
-         // per the app-wide convention. Use COALESCE so the planned
-         // branch (NULL code) doesn't blow up the CONCAT result.
-         'sql_col'=>"CONCAT('(', COALESCE(e.item_code,''), ')-', COALESCE(e.item_name,''))"],
-        ['key'=>'qty',           'label'=>'Qty',          'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.qty',          'th_class'=>'r','td_class'=>'r'],
-        ['key'=>'line_qty_planned', 'label'=>'Planned',    'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.line_qty_planned', 'th_class'=>'r','td_class'=>'r'],
-        ['key'=>'line_count',    'label'=>'Lines',        'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.line_count',    'th_class'=>'r','td_class'=>'r'],
-        ['key'=>'receipt_count', 'label'=>'Receipts',     'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.receipt_count', 'th_class'=>'r','td_class'=>'r'],
-        ['key'=>'inv_linked',    'label'=>'Linked',       'sortable'=>false,'searchable'=>false, 'th_class'=>'r','td_class'=>'r'],
-        ['key'=>'inv_unlinked',  'label'=>'Unlinked',     'sortable'=>false,'searchable'=>false, 'th_class'=>'r','td_class'=>'r'],
-        ['key'=>'location_name', 'label'=>'Location',     'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.location_name'],
-        ['key'=>'actor_name',    'label'=>'By',           'sortable'=>false,'searchable'=>false],
         ['key'=>'notes',         'label'=>'Notes',        'sortable'=>false,'searchable'=>true,  'sql_col'=>'e.notes', 'td_class'=>'muted small'],
         ['key'=>'txn_notes',     'label'=>'Notes/Attachments', 'sortable'=>false,'searchable'=>false, 'th_class'=>'r','td_class'=>'r nowrap',
          'sql_col'=>$hasNotesExpr,
@@ -4567,6 +4871,27 @@ $dtCfg = [
              ['value'=>'0', 'label'=>'Not available'],
          ]]],
         ['key'=>'_actions',      'label'=>'Actions',      'sortable'=>false,'searchable'=>false, 'th_class'=>'r','td_class'=>'r nowrap'],
+
+        // ---- Hidden by default (available via the ⚙ Columns panel) ----
+        ['key'=>'sh_mode',       'label'=>'Mode',         'sortable'=>true, 'sql_col'=>'e.sh_mode', 'default_hidden'=>true,
+         'filter' => ['type'=>'select','placeholder'=>'all','options'=>[
+             ['value'=>'receive', 'label'=>'Receive only'],
+             ['value'=>'ship',    'label'=>'Ship only'],
+             ['value'=>'both',    'label'=>'Both'],
+         ]]],
+        ['key'=>'old_txn',       'label'=>'Txn ID',       'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.old_transaction_id', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
+        // Internal transaction id — the same "Txn ID" shown on the
+        // Transaction history page (inv_txns.id). Only receipt events are
+        // 1:1 with an inv_txns row (via inv_receipts.txn_id); other rows
+        // show "—".
+        ['key'=>'inv_txn_id',    'label'=>'Internal Txn ID', 'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.inv_txn_id', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
+        ['key'=>'line_qty_planned', 'label'=>'Planned',    'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.line_qty_planned', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
+        ['key'=>'line_count',    'label'=>'Lines',        'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.line_count',    'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
+        ['key'=>'receipt_count', 'label'=>'Receipts',     'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.receipt_count', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
+        ['key'=>'inv_linked',    'label'=>'Linked',       'sortable'=>false,'searchable'=>false, 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
+        ['key'=>'inv_unlinked',  'label'=>'Unlinked',     'sortable'=>false,'searchable'=>false, 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
+        ['key'=>'location_name', 'label'=>'Location',     'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.location_name', 'default_hidden'=>true],
+        ['key'=>'actor_name',    'label'=>'By',           'sortable'=>false,'searchable'=>false, 'default_hidden'=>true],
     ],
     // Sort by the captured server-side timestamp (event_at) so events
     // ordered within a single business day still come out in real
@@ -4575,11 +4900,14 @@ $dtCfg = [
     'default_sort' => ['event_at', 'desc'],
 ];
 
-// Per-shipment running-note counts for the rows on the current page.
-// Populated AFTER data_table_run() returns (it knows the page slice);
-// the renderer reads it by reference, so the order of assignment is fine.
-$shipmentNoteCounts = [];
-$rowRenderer = function ($r) use ($canManage, &$shipmentNoteCounts) {
+// Per-LINE running-note counts for the rows on the current page, populated
+// AFTER data_table_run() returns (it knows the page slice); the renderer
+// reads them by reference, so the order of assignment is fine.
+//   $shrNoteCounts     — new shr_line composer notes  (entity_type 'shr_line')
+//   $lineLegacyCounts  — legacy imported notes for the line (read-only popup)
+$shrNoteCounts    = [];
+$lineLegacyCounts = [];
+$rowRenderer = function ($r) use ($canManage, &$shrNoteCounts, &$lineLegacyCounts) {
     // Direction pill — three flavors now.
     //   receive  → green: material arrived
     //   ship_out → amber: material dispatched
@@ -4707,31 +5035,70 @@ $rowRenderer = function ($r) use ($canManage, &$shipmentNoteCounts) {
                   . '">✎ <span class="dt-action-label">Edit</span></a>';
     }
 
+    // Running notes — opens the standard composer (body + file attachments)
+    // for THIS transaction line (entity_type 'shr_line' / entity_id =
+    // shipment_line_id), so a note maps to the line's inventory item, not the
+    // whole shipment. The count is batch-prefilled in $shrNoteCounts (see
+    // below); on the datatable AJAX rows path that prefill hasn't run yet, so
+    // fall back to a per-line lookup. Add the same control to the gear menu
+    // for discoverability (the NOTES/ATTACHMENTS column carries it too).
+    $shrLineId = (int)($r['shipment_line_id'] ?? 0);
+    if ($shrLineId > 0) {
+        if (!array_key_exists($shrLineId, $shrNoteCounts)) {
+            $one = notes_counts_for('shr_line', [$shrLineId]);
+            $shrNoteCounts[$shrLineId] = $one[$shrLineId] ?? 0;
+        }
+        $actions .= ' ' . notes_popup_menu_item('shr_line', $shrLineId, 'Notes', $shrNoteCounts[$shrLineId]);
+    }
+
     $lineCount    = (int)($r['line_count'] ?? 0);
     $receiptCount = (int)($r['receipt_count'] ?? 0);
 
-    // Notes/Attachments — clip icon when this shipment's transactions carry
-    // running notes. Click opens a popup listing them (handled by
-    // shr_txn_notes_popup_assets()). The count map is batch-prefilled for
-    // the initial page render; on the datatable's AJAX rows path (sort /
-    // filter / paginate) data_table_run() renders and exits BEFORE the
-    // prefill runs, so fall back to a memoized per-shipment lookup here.
-    $shipId = (int)$r['shipment_id'];
-    if (!array_key_exists($shipId, $shipmentNoteCounts)) {
-        $oneCount = shr_shipment_txn_note_counts([$shipId]);
-        $shipmentNoteCounts[$shipId] = $oneCount[$shipId] ?? 0;
+    // Notes/Attachments — PER LINE (not per shipment). Two affordances:
+    //   📝 editable — opens the standard composer modal for this line
+    //      (entity_type 'shr_line'); add a note + file attachments, or read
+    //      existing ones. Shown to managers always (so they can add) and to
+    //      everyone when the line already has notes (so they can read).
+    //   📎 legacy   — read-only popup of notes imported from the old system
+    //      for THIS line (keyed by data-line-id). Only when that line has any.
+    // Counts are batch-prefilled for the initial render; on the datatable AJAX
+    // rows path the prefill hasn't run, so fall back to a per-line lookup.
+    $newCount = 0;
+    if ($shrLineId > 0) {
+        if (!array_key_exists($shrLineId, $shrNoteCounts)) {
+            $one = notes_counts_for('shr_line', [$shrLineId]);
+            $shrNoteCounts[$shrLineId] = $one[$shrLineId] ?? 0;
+        }
+        $newCount = (int)$shrNoteCounts[$shrLineId];
     }
-    $shNoteCount = $shipmentNoteCounts[$shipId];
-    if ($shNoteCount > 0) {
-        $txnNotesCell = '<button type="button" class="shr-notes-indicator"'
-            . ' data-shipment-id="' . (int)$r['shipment_id'] . '"'
-            . ' data-ship-no="' . h($r['ship_no']) . '"'
-            . ' title="' . $shNoteCount . ' note' . ($shNoteCount === 1 ? '' : 's')
-            . ' on this shipment&#39;s transactions">'
-            . '📎&nbsp;<span class="shr-notes-badge">' . $shNoteCount . '</span></button>';
-    } else {
-        $txnNotesCell = '<span class="muted small">—</span>';
+    $legCount = 0;
+    if ($shrLineId > 0) {
+        if (!array_key_exists($shrLineId, $lineLegacyCounts)) {
+            $oneL = shr_line_txn_note_counts([$shrLineId]);
+            $lineLegacyCounts[$shrLineId] = $oneL[$shrLineId] ?? 0;
+        }
+        $legCount = (int)$lineLegacyCounts[$shrLineId];
     }
+
+    $noteBtnStyle = 'background:none;border:none;padding:0;cursor:pointer;'
+                  . 'font:inherit;line-height:1;white-space:nowrap;color:#1d4ed8;';
+    $parts = [];
+    if ($shrLineId > 0 && ($canManage || $newCount > 0)) {
+        $badge = $newCount > 0 ? '&nbsp;<span class="shr-notes-badge">' . $newCount . '</span>' : '';
+        $parts[] = '<button type="button" class="notes-popup-btn" style="' . $noteBtnStyle . '"'
+                 . ' data-entity-type="shr_line" data-entity-id="' . $shrLineId . '"'
+                 . ' title="' . ($canManage ? 'View / add notes &amp; attachments for this line'
+                                            : 'View notes for this line') . '">'
+                 . '📝' . $badge . '</button>';
+    }
+    if ($shrLineId > 0 && $legCount > 0) {
+        $parts[] = '<button type="button" class="shr-notes-indicator"'
+                 . ' data-line-id="' . $shrLineId . '"'
+                 . ' data-ship-no="' . h($r['ship_no']) . '"'
+                 . ' title="' . $legCount . ' imported note' . ($legCount === 1 ? '' : 's') . ' on this line">'
+                 . '📎&nbsp;<span class="shr-notes-badge">' . $legCount . '</span></button>';
+    }
+    $txnNotesCell = !empty($parts) ? implode(' ', $parts) : '<span class="muted small">—</span>';
 
     return [
         'event_at'      => h(dt_display($r['event_at'])),
@@ -4767,16 +5134,21 @@ $rowRenderer = function ($r) use ($canManage, &$shipmentNoteCounts) {
 };
 $dt = data_table_run($dtCfg, $rowRenderer);
 
-// Batched note rollup for just the rows on this page (one query). The
-// renderer captured $shipmentNoteCounts by reference, so filling it here —
-// after the page slice is known but before data_table_render() iterates —
-// is what lights up the clip icons. Seed 0 for every page shipment so the
-// renderer's array_key_exists() check treats them as "known" and skips the
-// per-row fallback query on the initial render.
-$pageShipmentIds    = array_map('intval', array_column($dt['rows'], 'shipment_id'));
-$shipmentNoteCounts = shr_shipment_txn_note_counts($pageShipmentIds);
-foreach ($pageShipmentIds as $sid) {
-    if (!array_key_exists($sid, $shipmentNoteCounts)) $shipmentNoteCounts[$sid] = 0;
+// Batched PER-LINE note counts for just the rows on this page (two queries).
+// The renderer captured $shrNoteCounts + $lineLegacyCounts by reference, so
+// filling them here — after the page slice is known but before
+// data_table_render() iterates — is what lights up the indicators. Seed 0 for
+// every page line so the renderer's array_key_exists() check treats them as
+// "known" and skips the per-row fallback query on the initial render.
+$pageLineIds = array_values(array_filter(
+    array_map('intval', array_column($dt['rows'], 'shipment_line_id')),
+    function ($v) { return $v > 0; }
+));
+$shrNoteCounts    = notes_counts_for('shr_line', $pageLineIds);   // new composer notes
+$lineLegacyCounts = shr_line_txn_note_counts($pageLineIds);       // imported legacy notes
+foreach ($pageLineIds as $lid) {
+    if (!array_key_exists($lid, $shrNoteCounts))    $shrNoteCounts[$lid]    = 0;
+    if (!array_key_exists($lid, $lineLegacyCounts)) $lineLegacyCounts[$lid] = 0;
 }
 
 $newBtnHtml = $canManage
@@ -4792,4 +5164,5 @@ $page_module = 'inventory_shiprcpt';
 require __DIR__ . '/includes/header.php';
 data_table_render($dtCfg, $dt, $rowRenderer);
 shr_txn_notes_popup_assets();   // clip-icon popup CSS + JS (emitted once)
+notes_popup_assets();           // running-notes composer modal (📝 Notes action)
 require __DIR__ . '/includes/footer.php';

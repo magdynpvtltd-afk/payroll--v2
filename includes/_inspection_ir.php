@@ -517,8 +517,9 @@ function ir_sample_accept_map($params, $grid, $sampleCount)
  * Derive the IR header quantity figures from an inspection row + its
  * results grid, per the confirmed business rules:
  *
- *   PDN qty      = transaction quantity when the inspection targets an
- *                  inv_txn, otherwise the sample count (= sample qty).
+ *   PDN qty      = the production quantity entered at plan time when set;
+ *                  otherwise the transaction quantity when the inspection
+ *                  targets an inv_txn, otherwise the sample count (= sample qty).
  *   Chkd qty     = sample count (number of sample columns inspected).
  *   Accepted qty = number of sample columns marked Accepted.
  *
@@ -530,7 +531,15 @@ function ir_header_quantities($row, $params, $grid)
     $resolved    = ir_resolve_inspected_item($row);
     $txnQty      = $resolved['txn_qty'];
 
-    $pdn      = ($txnQty !== null) ? (int)round($txnQty) : $sampleCount;
+    // Operator-entered production quantity wins when present, so the IR
+    // header reflects the lot size the planner recorded.
+    if (isset($row['pdn_qty']) && $row['pdn_qty'] !== null && $row['pdn_qty'] !== '') {
+        $pdn = (int)$row['pdn_qty'];
+    } elseif ($txnQty !== null) {
+        $pdn = (int)round($txnQty);
+    } else {
+        $pdn = $sampleCount;
+    }
     $chkd     = $sampleCount;
     $accepted = count(array_filter(ir_sample_accept_map($params, $grid, $sampleCount)));
 

@@ -74,7 +74,10 @@ function user_dt_prefs_apply(array $cfg, $userId)
     if (empty($cfg['id']) || empty($cfg['columns'])) return $cfg;
 
     $prefs = user_dt_prefs_load($userId, $cfg['id']);
-    if (!$prefs) return $cfg;
+    // NOTE: don't early-return on empty $prefs. Even with no saved prefs we
+    // still need to honour each column's app-default visibility, expressed
+    // via `default_hidden => true` (a column that ships hidden but stays
+    // available to un-hide from the ⚙ Columns panel).
 
     $cols = $cfg['columns'];
 
@@ -84,7 +87,9 @@ function user_dt_prefs_apply(array $cfg, $userId)
         $p = $prefs[$k] ?? null;
         $c['_pref_order']  = ($p && $p['order'] !== null) ? $p['order'] : null;
         $c['_pref_width']  = ($p && $p['width'] !== null) ? $p['width'] : null;
-        $c['_pref_hidden'] = ($p && $p['hidden']);
+        // Visibility: an explicit user pref always wins. With no saved pref
+        // row, fall back to the column's app default (`default_hidden`).
+        $c['_pref_hidden'] = $p !== null ? !empty($p['hidden']) : !empty($c['default_hidden']);
         // Carry the saved width forward as a real width hint so the
         // existing column-width rendering paths pick it up without
         // needing JS to re-apply it after load.

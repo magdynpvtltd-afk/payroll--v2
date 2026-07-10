@@ -1776,6 +1776,9 @@ if ($action === 'save') {
         $jobCardId   = (int)input('job_card_id', 0) ?: null;
         $sampleCount = max(1, min(60, (int)input('sample_count', 1)));
         $chkdQty     = input('chkd_qty', '') !== '' ? (int)input('chkd_qty', 0) : null;
+        // Production quantity entered at plan time — drives the PDN Qty
+        // shown on the IR view and printed report (see ir_header_quantities).
+        $pdnQty      = input('pdn_qty', '') !== '' ? max(0, (int)input('pdn_qty', 0)) : null;
 
         $validTypes = ['incoming','asset_cal','finished_goods','first_article','adhoc'];
         if (!in_array($type, $validTypes, true)) $type = 'adhoc';
@@ -1807,12 +1810,12 @@ if ($action === 'save') {
                 'INSERT INTO inspections
                    (code, ir_no, inspection_type, entity_type, entity_id, template_id,
                     status, verdict_notes, planned_by, due_date,
-                    job_card_id, sample_count, chkd_qty,
+                    job_card_id, sample_count, pdn_qty, chkd_qty,
                     part_no, part_rev, part_description, pid)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [$code, $irNo, $type, $entityType, $entityId, $templateId,
                  'draft', $verdict ?: null, $uid, $dueDate,
-                 $jobCardId, $sampleCount, $chkdQty,
+                 $jobCardId, $sampleCount, $pdnQty, $chkdQty,
                  $partSnap['part_no'], $partSnap['part_rev'],
                  $partSnap['part_description'], $partSnap['pid']]
             );
@@ -4780,6 +4783,15 @@ if ($action === 'new') {
                             How many sample parts the inspector will measure (S1..SN on the printed IR).
                             1 = traditional single-sample inspection. The number of result rows seeded
                             from the template will be multiplied by this.
+                        </p>
+                    </div>
+                    <div class="field">
+                        <label for="f_pdn_qty">Production qty</label>
+                        <input id="f_pdn_qty" type="number" name="pdn_qty" min="0"
+                               placeholder="Total produced">
+                        <p class="muted small" style="margin: 3px 0 0;">
+                            Quantity produced for this lot. Shown as <strong>PDN Qty</strong>
+                            on the IR view and printed report.
                         </p>
                     </div>
                     <div class="field">

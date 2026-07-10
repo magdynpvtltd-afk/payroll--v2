@@ -205,7 +205,7 @@ if (notes_handle_action()) {
         $et  = (string)input('entity_type', '');
         $eid = (int)input('entity_id', 0);
         $rt  = (string)input('return_to', '');
-        if (in_array($et, ['asset','asset_txn','inv_item','inv_txn','inspection','inspection_template'], true) && $eid > 0) {
+        if (in_array($et, ['asset','asset_txn','inv_item','inv_txn','inspection','inspection_template','shiprcpt','shr_line'], true) && $eid > 0) {
             notes_render($et, $eid, 'modal', $rt);
         }
         exit;
@@ -674,7 +674,7 @@ if ($action === 'modal') {
     $et = (string)input('entity_type', '');
     $id = (int)input('entity_id', 0);
     $rt = (string)input('return_to', '');
-    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template'], true) || $id <= 0) {
+    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template', 'shiprcpt', 'shr_line'], true) || $id <= 0) {
         http_response_code(400);
         echo '<p style="color:#b91c1c;">Bad request.</p>';
         exit;
@@ -694,7 +694,7 @@ if ($action === 'attachments') {
     header('Content-Type: application/json; charset=utf-8');
     $et = (string)input('entity_type', '');
     $id = (int)input('entity_id', 0);
-    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template'], true) || $id <= 0) {
+    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template', 'shiprcpt', 'shr_line'], true) || $id <= 0) {
         echo '[]';
         exit;
     }
@@ -1198,6 +1198,7 @@ $dtCfg = [
                     WHEN n.entity_type = 'asset_txn'  THEN eat_a.asset_tag
                     WHEN n.entity_type = 'inv_txn'    THEN eit_i.code
                     WHEN n.entity_type = 'inspection' THEN ein.code
+                    WHEN n.entity_type = 'shr_line'   THEN esl_i.code
                 END AS entity_code,
                 -- Short description of the linked entity: asset name for
                 -- assets/asset txns; inventory short_description for items/inv
@@ -1207,6 +1208,7 @@ $dtCfg = [
                     WHEN n.entity_type = 'asset_txn' THEN eat_a.asset_name
                     WHEN n.entity_type = 'inv_item'  THEN ei.short_description
                     WHEN n.entity_type = 'inv_txn'   THEN eit_i.short_description
+                    WHEN n.entity_type = 'shr_line'  THEN esl_i.short_description
                 END AS entity_desc,
                 CASE
                     WHEN n.entity_type = 'inv_item' THEN ei.part_no
@@ -1225,7 +1227,10 @@ $dtCfg = [
            LEFT JOIN assets     eat_a   ON n.entity_type = 'asset_txn' AND eat_a.id   = eat.asset_id
            LEFT JOIN inv_txns   eit     ON n.entity_type = 'inv_txn'   AND eit.id     = n.entity_id
            LEFT JOIN inv_items  eit_i   ON n.entity_type = 'inv_txn'   AND eit_i.id   = eit.item_id
-           LEFT JOIN inspections ein    ON n.entity_type = 'inspection' AND ein.id    = n.entity_id",
+           LEFT JOIN inspections ein    ON n.entity_type = 'inspection' AND ein.id    = n.entity_id
+           LEFT JOIN inv_shipment_lines esl ON n.entity_type = 'shr_line' AND esl.id    = n.entity_id
+           LEFT JOIN inv_items  esl_i   ON n.entity_type = 'shr_line'   AND esl_i.id   = esl.item_id
+           LEFT JOIN inv_shipments esl_sh ON n.entity_type = 'shr_line' AND esl_sh.id  = esl.shipment_id",
     'extra_where' => [
         ['n.is_deleted = 0', []],
         [$catWhere, []],
@@ -1242,6 +1247,7 @@ $dtCfg = [
                 WHEN n.entity_type = 'asset_txn'  THEN eat_a.asset_tag
                 WHEN n.entity_type = 'inv_txn'    THEN eit_i.code
                 WHEN n.entity_type = 'inspection' THEN ein.code
+                WHEN n.entity_type = 'shr_line'   THEN esl_i.code
             END"],
         ['key'=>'entity',         'label'=>'Entity',     'sortable'=>false, 'searchable'=>true,
             'sql_col'=>"CASE
@@ -1250,6 +1256,7 @@ $dtCfg = [
                 WHEN n.entity_type = 'asset_txn'  THEN CONCAT(eat_a.asset_tag, ' ', eat.txn_type)
                 WHEN n.entity_type = 'inv_txn'    THEN CONCAT(eit_i.code, ' ', eit.txn_type)
                 WHEN n.entity_type = 'inspection' THEN ein.code
+                WHEN n.entity_type = 'shr_line'   THEN CONCAT(esl_i.code, ' · ', esl_sh.ship_no)
             END"],
         ['key'=>'entity_desc',    'label'=>'Description', 'sortable'=>false, 'searchable'=>true,
             'sql_col'=>"CONCAT_WS(' ',
@@ -1258,6 +1265,7 @@ $dtCfg = [
                     WHEN n.entity_type = 'asset_txn' THEN eat_a.asset_name
                     WHEN n.entity_type = 'inv_item'  THEN ei.short_description
                     WHEN n.entity_type = 'inv_txn'   THEN eit_i.short_description
+                    WHEN n.entity_type = 'shr_line'  THEN esl_i.short_description
                 END,
                 CASE WHEN n.entity_type = 'inv_item' THEN ei.part_no    WHEN n.entity_type = 'inv_txn' THEN eit_i.part_no    END,
                 CASE WHEN n.entity_type = 'inv_item' THEN ei.part_rev_no WHEN n.entity_type = 'inv_txn' THEN eit_i.part_rev_no END
@@ -1324,6 +1332,22 @@ $rowRenderer = function ($r) use ($attsByNote) {
         if ($it) {
             $entLabel = $it['code'] . ' · ' . $it['txn_type'];
             $entLink  = url('/inventory.php?action=item_edit&id=' . (int)$it['item_id']);
+        }
+    } elseif ($r['entity_type'] === 'shr_line') {
+        // Shipment line — link to the parent shipment's view page; label
+        // with the line's inventory item code + ship #.
+        $sline = db_one(
+            'SELECT sl.id, sl.shipment_id, i.code AS item_code, sh.ship_no
+               FROM inv_shipment_lines sl
+               LEFT JOIN inv_items     i  ON i.id  = sl.item_id
+               LEFT JOIN inv_shipments sh ON sh.id = sl.shipment_id
+              WHERE sl.id = ?',
+            [$r['entity_id']]
+        );
+        if ($sline) {
+            $entLabel = ($sline['item_code'] ?: ('line #' . (int)$sline['id']))
+                      . ($sline['ship_no'] ? ' · ' . $sline['ship_no'] : '');
+            $entLink  = url('/inventory_shiprcpt.php?action=view&id=' . (int)$sline['shipment_id']);
         }
     } elseif ($r['entity_type'] === 'inspection') {
         $ins = db_one('SELECT id, code FROM inspections WHERE id = ?', [$r['entity_id']]);

@@ -327,11 +327,12 @@ if ($action === 'txn_process') {
         if ($entries) $childSplit[$lineId] = $entries;
     }
 
-    // Guard: held locations (LOC-LIP / LOC-SMP) may never be a consumption
-    // source — their stock is add/move only. The per-line picker already
-    // excludes them; this rejects a hand-crafted POST that tries anyway.
+    // Guard: held locations (LOC-LIP / LOC-SMP) and LOC-QCH (Quality Check
+    // Hold) may never be a consumption source — their stock is add/move only
+    // (QCH is released server-side on inspection approval). The per-line picker
+    // already excludes them; this rejects a hand-crafted POST that tries anyway.
     if ($childSplit) {
-        $heldInList = inv_held_location_codes_sql();
+        $heldInList = inv_shipprocess_excluded_location_codes_sql();
         $heldIds = [];
         foreach (db_all(
             "SELECT id FROM locations
@@ -342,7 +343,7 @@ if ($action === 'txn_process') {
         foreach ($childSplit as $entries) {
             foreach ($entries as $e) {
                 if (isset($heldIds[$e['loc']])) {
-                    flash_set('error', 'Held stock (Lost In Process / Sample) cannot be '
+                    flash_set('error', 'Stock held for QC / Lost In Process / Sample cannot be '
                         . 'consumed in a build. Move it to an available location first.');
                     redirect(url('/inventory.php?action=process'));
                 }
@@ -588,7 +589,10 @@ if ($action === 'txn_process') {
                 $qty, $product['code'], $directAddition ? ' (direct addition)' : '', $landing);
         }
         flash_set('success', $msg);
-        redirect(url('/inventory.php?action=ledger&id=' . $productId));
+        // Return to the Process inventory page so the operator can process
+        // the next item without navigating back. The success flash above
+        // confirms what just landed (and where).
+        redirect(url('/inventory.php?action=process'));
     } catch (Exception $e) {
         if (db()->inTransaction()) db()->rollBack();
         flash_set('error', $e->getMessage());
@@ -923,9 +927,10 @@ if ($action === 'process') {
     }
 
     // Source-location options for the per-child-line pickers. Held
-    // locations (LOC-LIP / LOC-SMP) are excluded — their stock is tracked
-    // but can never be consumed in a build, only added to or moved.
-    $heldInList = inv_held_location_codes_sql();
+    // locations (LOC-LIP / LOC-SMP) and LOC-QCH (Quality Check Hold) are
+    // excluded — their stock is tracked but can never be consumed in a build,
+    // only added to or moved / released server-side.
+    $heldInList = inv_shipprocess_excluded_location_codes_sql();
     $locs = db_all(
         "SELECT id, code, name FROM locations
           WHERE is_active = 1

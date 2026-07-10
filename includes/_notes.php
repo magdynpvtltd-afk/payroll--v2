@@ -50,6 +50,14 @@ function _notes_permission_for($entityType)
         'asset_txn'  => ['asset',                'transact'],
         'inv_item'   => ['inventory_view_items', 'manage'],
         'inv_txn'    => ['inventory_view_items', 'manage'],
+        // Shipment-LINE running notes — the Ship & Receipt list/view pages let
+        // a user with inventory_shiprcpt.manage attach notes + files to one
+        // transaction line (entity_id = inv_shipment_lines.id). The line
+        // carries the inventory item code, so the note maps to that item +
+        // line, NOT the whole shipment.
+        'shr_line'   => ['inventory_shiprcpt',   'manage'],
+        // Legacy shipment-level value (kept readable; superseded by shr_line).
+        'shiprcpt'   => ['inventory_shiprcpt',   'manage'],
         // Inspection notes: anyone who can execute an inspection (the
         // inspector role) can add/edit notes on it. View-only users
         // can still read notes thanks to the per-category view check.
