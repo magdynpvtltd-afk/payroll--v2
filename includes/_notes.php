@@ -56,6 +56,12 @@ function _notes_permission_for($entityType)
         // carries the inventory item code, so the note maps to that item +
         // line, NOT the whole shipment.
         'shr_line'   => ['inventory_shiprcpt',   'manage'],
+        // Per-RECEIPT shipment notes — a shipment LINE can be received in
+        // several receipts, each with its own internal txn (inv_txns.id). The
+        // Ship & Receipt list keys receipt-row notes on the txn (entity_id =
+        // inv_txns.id) so a note maps to that one receipt, not every receipt of
+        // the line. Same manage gate as shr_line.
+        'shr_txn'    => ['inventory_shiprcpt',   'manage'],
         // Legacy shipment-level value (kept readable; superseded by shr_line).
         'shiprcpt'   => ['inventory_shiprcpt',   'manage'],
         // Inspection notes: anyone who can execute an inspection (the
@@ -306,6 +312,136 @@ function _notes_store_upload($file)
 }
 
 /**
+ * Resolve a short set of context rows describing the entity a note is being
+ * added to. Rendered at the top of the notes section (and the popup modal) so
+ * the user knows exactly which item / line / receipt they're annotating — the
+ * modal otherwise gives no clue. Returns a list of ['label'=>.., 'value'=>..];
+ * an empty array means "no header".
+ *
+ * Covers the inventory / shipment family (inventory code + short description +
+ * txn id + txn details). Other entity types return [] (no header shown).
+ */
+function _notes_entity_context($entityType, $entityId)
+{
+    $entityId = (int)$entityId;
+    if ($entityId <= 0) return [];
+    $rows = [];
+
+    $fmtQty = function ($v) {
+        if ($v === null || $v === '') return '';
+        return rtrim(rtrim(number_format((float)$v, 3, '.', ''), '0'), '.');
+    };
+    $prettyTxn = function ($t) {
+        $map = [
+            'receive' => 'Receive', 'issue' => 'Issue', 'adjust' => 'Adjust',
+            'process' => 'Process', 'ship_out' => 'Ship out', 'ship_in' => 'Receipt',
+            'move' => 'Move',
+        ];
+        return $map[$t] ?? ucfirst(str_replace('_', ' ', (string)$t));
+    };
+
+    if ($entityType === 'shr_txn') {
+        // entity_id = inv_txns.id (the internal txn id). Resolve the item plus
+        // the receipt / shipment this txn belongs to.
+        $t = db_one(
+            "SELECT t.id, t.txn_type, t.txn_date, t.qty_delta, t.created_at,
+                    i.code AS item_code, i.short_description,
+                    r.qty_received, r.receipt_date, r.receipt_no, sh.ship_no
+               FROM inv_txns t
+               LEFT JOIN inv_items     i  ON i.id  = t.item_id
+               LEFT JOIN inv_receipts  r  ON r.txn_id = t.id
+               LEFT JOIN inv_shipments sh ON sh.id = r.shipment_id
+              WHERE t.id = ?
+              ORDER BY r.id
+              LIMIT 1",
+            [$entityId]
+        );
+        if ($t) {
+            if (!empty($t['item_code']))         $rows[] = ['label' => 'Inventory code',    'value' => $t['item_code']];
+            if (!empty($t['short_description']))  $rows[] = ['label' => 'Short description', 'value' => $t['short_description']];
+            $rows[] = ['label' => 'Internal txn ID', 'value' => '#' . (int)$t['id']];
+            $det = [];
+            if (!empty($t['txn_type'])) $det[] = $prettyTxn($t['txn_type']);
+            $q  = ($t['qty_received'] !== null && $t['qty_received'] !== '') ? $t['qty_received'] : $t['qty_delta'];
+            $qf = $fmtQty($q);
+            if ($qf !== '')             $det[] = 'Qty ' . $qf;
+            $d = $t['receipt_date'] ?: ($t['txn_date'] ?: ($t['created_at'] ? substr($t['created_at'], 0, 10) : ''));
+            if ($d)                      $det[] = (string)$d;
+            if (!empty($t['ship_no']))   $det[] = $t['ship_no'];
+            if (!empty($t['receipt_no'])) $det[] = 'Receipt ' . $t['receipt_no'];
+            if ($det) $rows[] = ['label' => 'Transaction', 'value' => implode(' · ', $det)];
+        }
+    } elseif ($entityType === 'shr_line') {
+        $sl = db_one(
+            "SELECT sl.id, sl.line_kind, sl.qty_planned, sl.qty_shipped, sl.qty_received,
+                    sl.old_transaction_id, sl.pending_name,
+                    i.code AS item_code, i.short_description,
+                    a.asset_tag, sh.ship_no
+               FROM inv_shipment_lines sl
+               LEFT JOIN inv_items     i  ON i.id  = sl.item_id
+               LEFT JOIN assets        a  ON a.id  = sl.asset_id
+               LEFT JOIN inv_shipments sh ON sh.id = sl.shipment_id
+              WHERE sl.id = ?",
+            [$entityId]
+        );
+        if ($sl) {
+            $code = $sl['item_code'] ?: ($sl['asset_tag'] ?: $sl['pending_name']);
+            if (!empty($code))                     $rows[] = ['label' => 'Inventory code',    'value' => $code];
+            if (!empty($sl['short_description']))   $rows[] = ['label' => 'Short description', 'value' => $sl['short_description']];
+            if (!empty($sl['old_transaction_id']))  $rows[] = ['label' => 'Txn ID', 'value' => (string)(int)$sl['old_transaction_id']];
+            // Internal txn id — only when it's unambiguous for this line, i.e.
+            // the line has a SINGLE receipt/txn. A multi-receipt line has several
+            // internal txns and no single one "belongs" to a line-level note;
+            // those are shown on each receipt row's own popup (entity 'shr_txn').
+            $itx = db_all(
+                "SELECT DISTINCT txn_id FROM inv_receipts
+                  WHERE shipment_line_id = ? AND txn_id IS NOT NULL ORDER BY txn_id",
+                [$entityId]
+            );
+            if (count($itx) === 1) {
+                $rows[] = ['label' => 'Internal txn ID', 'value' => '#' . (int)$itx[0]['txn_id']];
+            }
+            $det = [];
+            if (!empty($sl['line_kind'])) $det[] = $sl['line_kind'] === 'ship' ? 'Ship' : 'Receive';
+            if (!empty($sl['ship_no']))   $det[] = $sl['ship_no'];
+            $qp = $fmtQty($sl['qty_planned']);
+            if ($qp !== '')               $det[] = 'Planned ' . $qp;
+            if ($det) $rows[] = ['label' => 'Transaction', 'value' => implode(' · ', $det)];
+        }
+    } elseif ($entityType === 'inv_txn') {
+        $t = db_one(
+            "SELECT t.id, t.txn_type, t.txn_date, t.qty_delta, t.created_at, t.ref_doc,
+                    i.code AS item_code, i.short_description
+               FROM inv_txns t
+               LEFT JOIN inv_items i ON i.id = t.item_id
+              WHERE t.id = ?",
+            [$entityId]
+        );
+        if ($t) {
+            if (!empty($t['item_code']))         $rows[] = ['label' => 'Inventory code',    'value' => $t['item_code']];
+            if (!empty($t['short_description']))  $rows[] = ['label' => 'Short description', 'value' => $t['short_description']];
+            $rows[] = ['label' => 'Txn ID', 'value' => '#' . (int)$t['id']];
+            $det = [];
+            if (!empty($t['txn_type'])) $det[] = $prettyTxn($t['txn_type']);
+            $qf = $fmtQty($t['qty_delta']);
+            if ($qf !== '')             $det[] = 'Qty ' . $qf;
+            $d = $t['txn_date'] ?: ($t['created_at'] ? substr($t['created_at'], 0, 10) : '');
+            if ($d)                     $det[] = (string)$d;
+            if (!empty($t['ref_doc']))  $det[] = $t['ref_doc'];
+            if ($det) $rows[] = ['label' => 'Transaction', 'value' => implode(' · ', $det)];
+        }
+    } elseif ($entityType === 'inv_item') {
+        $i = db_one("SELECT code, short_description FROM inv_items WHERE id = ?", [$entityId]);
+        if ($i) {
+            if (!empty($i['code']))              $rows[] = ['label' => 'Inventory code',    'value' => $i['code']];
+            if (!empty($i['short_description'])) $rows[] = ['label' => 'Short description', 'value' => $i['short_description']];
+        }
+    }
+
+    return $rows;
+}
+
+/**
  * Render the running-notes section for a host page. Emits the composer
  * and the existing notes list.
  *
@@ -366,6 +502,23 @@ function notes_render($entityType, $entityId, $mode = 'inline', $returnTo = null
     // Note types — only those the user can MANAGE (post/edit).
     $types = notes_manageable_categories();
 
+    // Filter-bar options. Built from the notes actually loaded (not the
+    // full category/user tables) so a dropdown never offers a choice that
+    // matches zero rows. Keyed by value to dedupe.
+    $filterCats = [];
+    $filterAuthors = [];
+    foreach ($notes as $n) {
+        if (!empty($n['note_type_name'])) $filterCats[$n['note_type_name']] = true;
+        $an = trim((string)($n['author_name'] ?: $n['author_email']));
+        if ($an !== '') $filterAuthors[$an] = true;
+    }
+    $filterCats = array_keys($filterCats);
+    $filterAuthors = array_keys($filterAuthors);
+    natcasesort($filterCats);
+    natcasesort($filterAuthors);
+    // A single note can't be usefully filtered — skip the bar entirely.
+    $showFilters = count($notes) > 1;
+
     $currentUid = current_user_id();
     $postUrl = h(notes_endpoint_for($entityType, $entityId));
 
@@ -376,6 +529,22 @@ function notes_render($entityType, $entityId, $mode = 'inline', $returnTo = null
     <?php } else { ?>
     <div class="notes-section notes-section-modal" data-entity-type="<?= h($entityType) ?>" data-entity-id="<?= (int)$entityId ?>">
     <?php } ?>
+
+        <?php
+        // Context header — which item / line / receipt this note is attached to.
+        // Gives the popup modal (where the host row isn't visible) the inventory
+        // code, short description, txn id and txn details up front.
+        $entityCtx = _notes_entity_context($entityType, $entityId);
+        if ($entityCtx): ?>
+            <div class="notes-entity-context" style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;line-height:1.45;">
+                <?php foreach ($entityCtx as $cx): ?>
+                    <div style="display:flex;gap:8px;padding:2px 0;">
+                        <span style="color:#6b7280;font-weight:600;flex:0 0 130px;"><?= h($cx['label']) ?></span>
+                        <span style="color:#111827;word-break:break-word;"><?= h($cx['value']) ?></span>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
 
         <?php if ($canManage): ?>
             <div class="notes-composer-toggle-row">
@@ -417,6 +586,40 @@ function notes_render($entityType, $entityId, $mode = 'inline', $returnTo = null
             </form>
         <?php endif; ?>
 
+        <?php if ($showFilters): ?>
+            <!--
+              Client-side filter bar. Every note for this entity is already
+              in the DOM (the list isn't paginated), so filtering is a
+              show/hide pass — no round-trip, and it works the same inline
+              or inside the popup modal.
+            -->
+            <div class="notes-filters" role="search">
+                <input type="search" class="notes-filter-q" placeholder="Search notes…"
+                       aria-label="Search notes" autocomplete="off">
+                <?php if (count($filterCats) > 1): ?>
+                    <select class="no-combobox notes-filter-cat" aria-label="Filter by category">
+                        <option value="">All categories</option>
+                        <?php foreach ($filterCats as $fc): ?>
+                            <option value="<?= h($fc) ?>"><?= h($fc) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                <?php endif; ?>
+                <?php if (count($filterAuthors) > 1): ?>
+                    <select class="no-combobox notes-filter-author" aria-label="Filter by author">
+                        <option value="">All authors</option>
+                        <?php foreach ($filterAuthors as $fa): ?>
+                            <option value="<?= h($fa) ?>"><?= h($fa) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                <?php endif; ?>
+                <label class="notes-filter-check" title="Only notes that have attachments">
+                    <input type="checkbox" class="notes-filter-att"> 📎 Attached
+                </label>
+                <span class="muted small notes-filter-count"></span>
+                <button type="button" class="btn btn-ghost btn-sm notes-filter-clear" hidden>Clear</button>
+            </div>
+        <?php endif; ?>
+
         <div class="notes-list">
             <?php if ($canManage && !empty($notes) && !$isModal): ?>
                 <!--
@@ -443,7 +646,10 @@ function notes_render($entityType, $entityId, $mode = 'inline', $returnTo = null
                 $canActOnThis = $canManageThis && ($isAuthor || notes_can_manage($entityType));
                 $canRestore = $isRedacted && permission_check('running_notes', 'manage');
             ?>
-                <article class="note-item<?= $isRedacted ? ' note-item-redacted' : '' ?>" data-note-id="<?= (int)$n['id'] ?>">
+                <article class="note-item<?= $isRedacted ? ' note-item-redacted' : '' ?>" data-note-id="<?= (int)$n['id'] ?>"
+                         data-note-cat="<?= h((string)$n['note_type_name']) ?>"
+                         data-note-author="<?= h(trim((string)($n['author_name'] ?: $n['author_email']))) ?>"
+                         data-note-att="<?= count($atts) ?>">
                     <header class="note-head">
                         <strong class="note-author"><?= h($n['author_name'] ?: $n['author_email']) ?></strong>
                         <span class="muted small note-when"
@@ -548,8 +754,104 @@ function notes_render($entityType, $entityId, $mode = 'inline', $returnTo = null
                     <?php endif; ?>
                 </article>
             <?php endforeach; ?>
+            <?php if ($showFilters): ?>
+                <p class="muted empty notes-filter-empty" style="text-align: left; padding: 14px 0;" hidden>
+                    No notes match these filters.
+                </p>
+            <?php endif; ?>
         </div>
     </div>
+
+    <?php if ($showFilters): ?>
+    <script>
+    (function () {
+        // Same section lookup as the composer script below: this block is
+        // re-created by the modal opener (innerHTML doesn't run <script>),
+        // so document.currentScript is null and we locate the section by
+        // the entity identity PHP inlined here.
+        var entType = <?= json_encode((string)$entityType) ?>;
+        var entId   = <?= json_encode((string)$entityId) ?>;
+        var sections = document.querySelectorAll(
+            '.notes-section[data-entity-type="' + entType + '"][data-entity-id="' + entId + '"]'
+        );
+        var section = null;
+        for (var i = sections.length - 1; i >= 0; i--) {
+            if (sections[i].classList.contains('notes-section-modal')) { section = sections[i]; break; }
+        }
+        if (!section && sections.length) section = sections[sections.length - 1];
+        if (!section) return;
+
+        var bar = section.querySelector('.notes-filters');
+        if (!bar || bar.getAttribute('data-bound')) return;
+        bar.setAttribute('data-bound', '1');
+
+        var items    = Array.prototype.slice.call(section.querySelectorAll('.note-item'));
+        var qInp     = bar.querySelector('.notes-filter-q');
+        var catSel   = bar.querySelector('.notes-filter-cat');
+        var authSel  = bar.querySelector('.notes-filter-author');
+        var attChk   = bar.querySelector('.notes-filter-att');
+        var clearBtn = bar.querySelector('.notes-filter-clear');
+        var countEl  = bar.querySelector('.notes-filter-count');
+        var emptyEl  = section.querySelector('.notes-filter-empty');
+
+        // Cache each note's searchable text once. textContent covers the
+        // body, the author, the category pill and the attachment filenames,
+        // which is exactly the set a user expects "search" to look at.
+        // Whitespace is collapsed to single spaces so a typed phrase matches
+        // text that spans DOM elements (author / date / body concatenate with
+        // newlines + indentation between them).
+        var haystacks = items.map(function (it) { return (it.textContent || '').replace(/\s+/g, ' ').toLowerCase(); });
+
+        function apply() {
+            // Substring match of the WHOLE query (spaces and all), the same way
+            // the list search works — so "hardness report" matches that phrase,
+            // not every note that happens to contain both words separately.
+            var query = (qInp.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            var cat   = catSel  ? catSel.value  : '';
+            var auth  = authSel ? authSel.value : '';
+            var attOnly = attChk && attChk.checked;
+            var shown = 0;
+
+            items.forEach(function (it, idx) {
+                var ok = true;
+                if (cat && it.getAttribute('data-note-cat') !== cat) ok = false;
+                if (ok && auth && it.getAttribute('data-note-author') !== auth) ok = false;
+                if (ok && attOnly && parseInt(it.getAttribute('data-note-att') || '0', 10) < 1) ok = false;
+                if (ok && query) ok = haystacks[idx].indexOf(query) !== -1;
+                it.hidden = !ok;
+                if (ok) shown++;
+            });
+
+            var filtering = !!(query || cat || auth || attOnly);
+            countEl.textContent = filtering ? (shown + ' of ' + items.length) : '';
+            clearBtn.hidden = !filtering;
+            if (emptyEl) emptyEl.hidden = !(filtering && shown === 0);
+        }
+
+        qInp.addEventListener('input', apply);
+        if (catSel)  catSel.addEventListener('change', apply);
+        if (authSel) authSel.addEventListener('change', apply);
+        if (attChk)  attChk.addEventListener('change', apply);
+        clearBtn.addEventListener('click', function () {
+            qInp.value = '';
+            if (catSel)  catSel.value = '';
+            if (authSel) authSel.value = '';
+            if (attChk)  attChk.checked = false;
+            apply();
+            qInp.focus();
+        });
+        // Esc clears the filters rather than closing the popup, but only
+        // while the search box has focus and actually has text in it.
+        qInp.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && qInp.value !== '') {
+                e.stopPropagation();
+                qInp.value = '';
+                apply();
+            }
+        });
+    })();
+    </script>
+    <?php endif; ?>
 
     <?php // Load Quill (vendored). The CSS is appended once via <link>;
           // the JS once via <script>. Both files must exist at the paths

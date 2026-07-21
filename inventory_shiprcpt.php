@@ -453,6 +453,13 @@ function shr_txn_notes_popup_assets()
         #shrnotes-pop .shrnote-att { display:inline-flex;align-items:center;gap:6px;color:#1d4ed8;text-decoration:none;font-size:13px; }
         #shrnotes-pop .shrnote-att:hover { text-decoration:underline; }
         #shrnotes-pop .shrnotes-empty { padding:14px;color:#6b7280;font-size:13px; }
+        #shrnotes-pop .shrnotes-context { background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:13px;line-height:1.45; }
+        #shrnotes-pop .shrnotes-ctx-row { display:flex;gap:8px;padding:2px 0; }
+        #shrnotes-pop .shrnotes-ctx-label { color:#6b7280;font-weight:600;flex:0 0 130px; }
+        #shrnotes-pop .shrnotes-ctx-value { color:#111827;word-break:break-word; }
+        #shrnotes-pop .shrnotes-search { display:flex;align-items:center;gap:8px;margin-bottom:10px; }
+        #shrnotes-pop .shrnotes-search input { flex:1;padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font:inherit;font-size:13px; }
+        #shrnotes-pop .shrnotes-search-count { font-size:12px;color:#6b7280;white-space:nowrap; }
     </style>
     <script>
     (function () {
@@ -468,7 +475,7 @@ function shr_txn_notes_popup_assets()
         function hide() { pop.style.display = 'none'; backdrop.style.display = 'none'; pop.innerHTML = ''; }
         function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
 
-        function render(shipNo, list) {
+        function render(shipNo, list, context) {
             pop.innerHTML = '';
             var head = document.createElement('div');
             head.className = 'shrnotes-head';
@@ -482,40 +489,101 @@ function shr_txn_notes_popup_assets()
 
             var body = document.createElement('div');
             body.className = 'shrnotes-body';
+
+            // Context header — item / line / txn details this note set belongs to,
+            // so the popup states what you're looking at (same info the composer
+            // modal shows).
+            if (context && context.length) {
+                var ctx = document.createElement('div');
+                ctx.className = 'shrnotes-context';
+                context.forEach(function (row) {
+                    var r = document.createElement('div'); r.className = 'shrnotes-ctx-row';
+                    var l = document.createElement('span'); l.className = 'shrnotes-ctx-label'; l.textContent = row.label;
+                    var v = document.createElement('span'); v.className = 'shrnotes-ctx-value'; v.textContent = row.value;
+                    r.appendChild(l); r.appendChild(v); ctx.appendChild(r);
+                });
+                body.appendChild(ctx);
+            }
+
             if (!list.length) {
                 var em = document.createElement('div');
                 em.className = 'shrnotes-empty';
                 em.textContent = 'No notes found.';
                 body.appendChild(em);
-            } else {
-                list.forEach(function (n) {
-                    var card = document.createElement('div'); card.className = 'shrnote';
-                    var meta = document.createElement('div'); meta.className = 'shrnote-meta';
-                    var html = '<span class="shrnote-author">' + esc(n.author) + '</span>'
-                             + '<span>' + esc(n.created_at) + '</span>';
-                    if (n.note_type) html += '<span class="shrnote-type">' + esc(n.note_type) + '</span>';
-                    if (n.old_txn)   html += '<span title="Legacy transaction id">Txn #' + esc(n.old_txn) + '</span>';
-                    meta.innerHTML = html;
-                    card.appendChild(meta);
-                    var b = document.createElement('div'); b.className = 'shrnote-body';
-                    b.innerHTML = n.body_html || '';   // sanitized server-side at save time
-                    card.appendChild(b);
-                    if (n.attachments && n.attachments.length) {
-                        var atts = document.createElement('div'); atts.className = 'shrnote-atts';
-                        n.attachments.forEach(function (a) {
-                            var link = document.createElement('a');
-                            link.className = 'shrnote-att';
-                            link.href = base + '/note_attach.php?id=' + a.id;
-                            link.target = '_blank'; link.rel = 'noopener';
-                            link.title = a.filename;
-                            link.textContent = '📎 ' + a.filename;
-                            atts.appendChild(link);
-                        });
-                        card.appendChild(atts);
-                    }
-                    body.appendChild(card);
+                pop.appendChild(body);
+                backdrop.style.display = 'block';
+                pop.style.display = 'block';
+                return;
+            }
+
+            // Build the note cards.
+            var listWrap = document.createElement('div');
+            listWrap.className = 'shrnotes-list';
+            var cards = [];
+            list.forEach(function (n) {
+                var card = document.createElement('div'); card.className = 'shrnote';
+                var meta = document.createElement('div'); meta.className = 'shrnote-meta';
+                var html = '<span class="shrnote-author">' + esc(n.author) + '</span>'
+                         + '<span>' + esc(n.created_at) + '</span>';
+                if (n.note_type) html += '<span class="shrnote-type">' + esc(n.note_type) + '</span>';
+                if (n.old_txn)   html += '<span title="Legacy transaction id">Txn #' + esc(n.old_txn) + '</span>';
+                meta.innerHTML = html;
+                card.appendChild(meta);
+                var b = document.createElement('div'); b.className = 'shrnote-body';
+                b.innerHTML = n.body_html || '';   // sanitized server-side at save time
+                card.appendChild(b);
+                if (n.attachments && n.attachments.length) {
+                    var atts = document.createElement('div'); atts.className = 'shrnote-atts';
+                    n.attachments.forEach(function (a) {
+                        var link = document.createElement('a');
+                        link.className = 'shrnote-att';
+                        link.href = base + '/note_attach.php?id=' + a.id;
+                        link.target = '_blank'; link.rel = 'noopener';
+                        link.title = a.filename;
+                        link.textContent = '📎 ' + a.filename;
+                        atts.appendChild(link);
+                    });
+                    card.appendChild(atts);
+                }
+                listWrap.appendChild(card);
+                cards.push(card);
+            });
+
+            // Search box — client-side filter, same behaviour as the inventory
+            // notes filter. Only when there's more than one note to sift.
+            if (list.length > 1) {
+                var search = document.createElement('div');
+                search.className = 'shrnotes-search';
+                var inp = document.createElement('input');
+                inp.type = 'search'; inp.placeholder = 'Search notes…';
+                inp.setAttribute('aria-label', 'Search notes'); inp.autocomplete = 'off';
+                var cnt = document.createElement('span'); cnt.className = 'shrnotes-search-count';
+                search.appendChild(inp); search.appendChild(cnt);
+                body.appendChild(search);
+
+                // Collapse whitespace so a typed phrase matches text that spans
+                // the card's author / date / body.
+                var haystacks = cards.map(function (c) { return (c.textContent || '').replace(/\s+/g, ' ').toLowerCase(); });
+                function applyFilter() {
+                    // Substring match of the WHOLE query (spaces included), like
+                    // the list search — not an AND of separate words.
+                    var query = (inp.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    var shown = 0;
+                    cards.forEach(function (c, i) {
+                        var ok = !query || haystacks[i].indexOf(query) !== -1;
+                        c.style.display = ok ? '' : 'none';
+                        if (ok) shown++;
+                    });
+                    cnt.textContent = query ? (shown + ' of ' + cards.length) : '';
+                }
+                inp.addEventListener('input', applyFilter);
+                // Esc clears the search (with text) instead of closing the popup.
+                inp.addEventListener('keydown', function (e) {
+                    if (e.key === 'Escape' && inp.value !== '') { e.stopPropagation(); inp.value = ''; applyFilter(); }
                 });
             }
+
+            body.appendChild(listWrap);
             pop.appendChild(body);
             backdrop.style.display = 'block';
             pop.style.display = 'block';
@@ -530,7 +598,7 @@ function shr_txn_notes_popup_assets()
             var sid    = btn.getAttribute('data-shipment-id');
             var lineId = btn.getAttribute('data-line-id') || '';
             var shipNo = btn.getAttribute('data-ship-no') || '';
-            render(shipNo, []);
+            render(shipNo, [], []);
             pop.querySelector('.shrnotes-body').innerHTML = '<div class="shrnotes-empty">Loading…</div>';
             // Prefer the per-line endpoint (data-line-id) so the popup shows
             // only the legacy notes for THIS transaction line; fall back to the
@@ -540,7 +608,12 @@ function shr_txn_notes_popup_assets()
                               : 'id=' + encodeURIComponent(sid));
             fetch(url, { credentials: 'same-origin' })
                 .then(function (r) { return r.json(); })
-                .then(function (list) { render(shipNo, Array.isArray(list) ? list : []); })
+                .then(function (data) {
+                    // New shape { context, notes }; tolerate a bare array too.
+                    var notes   = Array.isArray(data) ? data : ((data && data.notes) || []);
+                    var context = (data && !Array.isArray(data) && data.context) || [];
+                    render(shipNo, notes, context);
+                })
                 .catch(function () {
                     pop.querySelector('.shrnotes-body').innerHTML =
                         '<div class="shrnotes-empty">Could not load notes.</div>';
@@ -594,12 +667,16 @@ if ($action === 'txn_notes') {
     // id (legacy callers) returns them rolled up to the whole shipment.
     $lineId = (int)input('line_id', 0);
     $id     = (int)input('id', 0);
+    // Context header rows (item / line / txn details) — same resolver the
+    // composer modal uses. Only meaningful for the per-LINE popup.
+    $context = [];
     if ($lineId > 0) {
         $notes = shr_line_txn_notes($lineId);
+        if (function_exists('_notes_entity_context')) $context = _notes_entity_context('shr_line', $lineId);
     } elseif ($id > 0) {
         $notes = shr_shipment_txn_notes($id);
     } else {
-        echo json_encode([]); exit;
+        echo json_encode(['context' => [], 'notes' => []]); exit;
     }
     $out = array_map(function ($n) {
         return [
@@ -614,7 +691,9 @@ if ($action === 'txn_notes') {
             }, $n['attachments']),
         ];
     }, $notes);
-    echo json_encode($out);
+    // Shape: { context: [{label,value}...], notes: [...] }. The popup JS also
+    // accepts a bare array for backward-compat.
+    echo json_encode(['context' => $context, 'notes' => $out]);
     exit;
 }
 
@@ -1513,6 +1592,20 @@ if ($action === 'save') {
             }
         }
 
+        // A receive line the vendor has already delivered against is locked the
+        // same way: the qty is in stock, an inspection may reference it, and the
+        // receipt ledger points at this row. The form renders it read-only and
+        // Step 2 leaves it untouched — the operator adds a new line instead.
+        // Gate on qty_received (not just inv_receipts rows): the asset and
+        // new-item-as-asset receive paths stamp qty_received WITHOUT writing an
+        // inv_receipts row, so a receipt-row count alone would miss them.
+        $receivedQtyByLineId = [];
+        if ($isAmendingSave && $id > 0) {
+            foreach (db_all('SELECT id, qty_received FROM inv_shipment_lines WHERE shipment_id = ?', [$id]) as $r) {
+                $receivedQtyByLineId[(int)$r['id']] = (float)$r['qty_received'];
+            }
+        }
+
         $specs = [];
         for ($i = 0; $i < $n; $i++) {
             $lid    = isset($lineIds[$i]) ? (int)$lineIds[$i] : 0;
@@ -1671,12 +1764,18 @@ if ($action === 'save') {
                 if ($s['line_id'] > 0) $submittedIds[$s['line_id']] = true;
             }
             // Lines the operator removed from the form. Refuse to drop
-            // any that have shipped qty or any receipt rows behind them.
+            // any that have shipped qty, received qty, or any receipt
+            // rows behind them.
             foreach ($existingIds as $eid => $shippedQty) {
                 if (isset($submittedIds[$eid])) continue;
                 if ($shippedQty > 0) {
                     db()->rollBack();
                     flash_set('error', "Cannot remove line #$eid from the shipment — it has already been shipped. Keep the line and adjust the rest of the amendment.");
+                    redirect(url('/inventory_shiprcpt.php?action=amend&id=' . $id));
+                }
+                if (($receivedQtyByLineId[$eid] ?? 0) > 0) {
+                    db()->rollBack();
+                    flash_set('error', "Cannot remove line #$eid from the shipment — it has already been received. Keep the line and add a new line for the extra quantity.");
                     redirect(url('/inventory_shiprcpt.php?action=amend&id=' . $id));
                 }
                 $rcptCnt = (int)db_val('SELECT COUNT(*) FROM inv_receipts WHERE shipment_line_id = ?', [$eid], 0);
@@ -1693,7 +1792,14 @@ if ($action === 'save') {
                     // historical shipment record. Leave the row untouched even
                     // if the form posted stale values (the source now reports 0
                     // stock). This mirrors the locked, read-only UI.
-                    if ((float)$existingIds[$s['line_id']] > 0) {
+                    //
+                    // Same for an already-received receive line: its qty_planned
+                    // is what the receipt ledger and any QC inspection were
+                    // raised against, so rewriting item/qty/price here would
+                    // retro-edit posted history. A hand-crafted POST that skips
+                    // the read-only form is dropped on the floor here.
+                    if ((float)$existingIds[$s['line_id']] > 0
+                        || ($receivedQtyByLineId[$s['line_id']] ?? 0) > 0) {
                         $written++;
                         continue;
                     }
@@ -1790,7 +1896,8 @@ if ($action === 'save') {
     //   - Amendment of past-draft   → po_create_amendment_for_shipment (new version)
     // Never throws — wrap so a downstream issue (e.g. code_sequences
     // misconfigured) doesn't block the local save flash.
-    $newPo = null;
+    $newPo   = null;
+    $poError = null;
     try {
         if ($isAmendingSave) {
             $newPo = po_create_amendment_for_shipment($id, $uid, $preAmendSnapshot);
@@ -1798,14 +1905,22 @@ if ($action === 'save') {
             $newPo = po_ensure_for_shipment($id, $uid);
         }
     } catch (\Throwable $ePo) {
-        error_log('[shiprcpt save] PO generation failed: ' . $ePo->getMessage());
+        $poError = $ePo->getMessage();
+        error_log('[shiprcpt save] PO generation failed: ' . $poError);
     }
 
     if ($isAmendingSave) {
-        $msg = 'Shipment amended';
-        if ($newPo) $msg .= ' — PO <strong>' . h($newPo['po_no']) . '</strong> updated to v' . (int)$newPo['version'];
-        $msg .= '.';
-        flash_set('success', $msg);
+        if ($newPo) {
+            flash_set('success', 'Shipment amended — PO <strong>' . h($newPo['po_no'])
+                . '</strong> updated to v' . (int)$newPo['version'] . '.');
+        } else {
+            // The lines were saved but no new PO version exists, so the PO
+            // still shows the pre-amend figures. Say so rather than reporting
+            // a clean success the operator would have no reason to re-check.
+            flash_set('error', 'Shipment lines were amended, but a new PO version could NOT be issued'
+                . ($poError ? ' (' . h($poError) . ')' : '')
+                . '. The PO still shows the previous figures — please retry or report this.');
+        }
     } else {
         flash_set('success', $isNew ? 'Shipment created as draft. Approve it to start movements.' : 'Shipment updated.');
     }
@@ -2411,6 +2526,14 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
     $vendors   = db_all('SELECT id, code, name, is_active FROM vendors ORDER BY name');
     $locations = db_all('SELECT id, name FROM locations WHERE is_active = 1 ORDER BY name');
     $itemOpts  = shr_item_picker_options();
+    // id => name for EVERY location, including inactive ones. The source picker
+    // only lists locations that currently hold stock, which never includes an
+    // already-shipped line's source (its stock has moved out) — this map lets
+    // the widget still name that source instead of showing a bare row id.
+    $locNameById = [];
+    foreach (db_all('SELECT id, name FROM locations') as $r) {
+        $locNameById[(int)$r['id']] = (string)$r['name'];
+    }
 
     $vMode        = $sh['mode']             ?? 'both';
     $vVendorId    = (int)($sh['vendor_id']  ?? 0);
@@ -2776,15 +2899,16 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
                 border-top: 1px solid var(--border);
             }
             .shr-section-label:first-of-type { border-top: none; margin-top: 6px; }
-            /* Already-shipped ship line — locked, not editable. */
-            tr.shr-line-shipped { opacity: 0.9; background: var(--surface-alt, #f7f7f8); }
-            tr.shr-line-shipped input,
-            tr.shr-line-shipped select,
-            tr.shr-line-shipped .cb-wrap,
-            tr.shr-line-shipped .shr-src-widget,
-            tr.shr-line-shipped .shr-line-remove { pointer-events: none; }
-            tr.shr-line-shipped .shr-line-remove { opacity: 0.4; }
-            .shr-shipped-badge {
+            /* Line whose event is already posted (ship line shipped, or
+               receive line received) — locked, not editable, not removable. */
+            tr.shr-line-locked { opacity: 0.9; background: var(--surface-alt, #f7f7f8); }
+            tr.shr-line-locked input,
+            tr.shr-line-locked select,
+            tr.shr-line-locked .cb-wrap,
+            tr.shr-line-locked .shr-src-widget,
+            tr.shr-line-locked .shr-line-remove { pointer-events: none; }
+            tr.shr-line-locked .shr-line-remove { opacity: 0.4; }
+            .shr-line-badge {
                 display: inline-block; margin-top: 4px;
                 font-size: 10px; font-weight: 700; text-transform: uppercase;
                 letter-spacing: 0.04em; color: var(--success, #1e7b30);
@@ -2867,9 +2991,17 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
                 // must not be re-validated or re-saved. Lock the row.
                 $lShipped = ($secKind === 'ship' && $isExisting
                              && (float)($L['qty_shipped'] ?? 0) > 0);
+                // Same for a receive line the vendor has already delivered
+                // against (qty_received > 0, whether from inv_receipts rows or
+                // the asset receive path): the stock is in, a QC inspection may
+                // hang off it, and the receipt ledger references this row. The
+                // operator adds a NEW row instead of rewriting this one.
+                $lReceived = ($secKind === 'receive' && $isExisting
+                              && (float)($L['qty_received'] ?? 0) > 0);
+                $lLockKind = $lShipped ? 'shipped' : ($lReceived ? 'received' : '');
             ?>
-                <tr class="shr-line-row<?= $lShipped ? ' shr-line-shipped' : '' ?>"
-                    data-subtype="<?= h($lSubType) ?>"<?= $lShipped ? ' data-shipped="1"' : '' ?>>
+                <tr class="shr-line-row<?= $lLockKind ? ' shr-line-locked' : '' ?>"
+                    data-subtype="<?= h($lSubType) ?>"<?= $lLockKind ? ' data-locked="' . h($lLockKind) . '"' : '' ?>>
                     <!-- line_id[] for UPDATE/INSERT/DELETE diff on amendment. 0 = new row. -->
                     <input type="hidden" name="line_id[]"   value="<?= (int)$lLineId ?>">
                     <!-- kind is fixed per section — hidden input, not a dropdown -->
@@ -3051,6 +3183,7 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
         if (!shipBody && !recvBody) return;
 
         var stockUrl = <?= json_encode(url('/inventory_shiprcpt.php?action=stock_by_location')) ?>;
+        var locNames = <?= json_encode($locNameById, JSON_UNESCAPED_UNICODE) ?>;
 
         // Per-item stock cache — avoids redundant XHR for the same item.
         var stockCache = {};
@@ -3103,8 +3236,8 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
             var q = row.querySelector('input[name="line_qty[]"]');
             return q ? (parseFloat(q.value || '0') || 0) : 0;
         }
-        function srcLocOptions(locs, selectedLoc) {
-            var html = '<option value="">— pick —</option>';
+        function srcLocOptions(locs, selectedLoc, locked) {
+            var html = locked ? '' : '<option value="">— pick —</option>';
             var found = false;
             locs.forEach(function (loc) {
                 var sel = (String(loc.id) === String(selectedLoc));
@@ -3114,8 +3247,13 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
             });
             // Preserve a previously-chosen loc that no longer reports stock so
             // the operator's pick isn't silently dropped (server re-validates).
+            // Name it from locNames — on a shipped line this is the norm, not an
+            // edge case, and "Loc #12" tells the operator nothing. The trailing
+            // "(0)" is a live stock warning, so it's meaningless on a locked row.
             if (selectedLoc && !found) {
-                html += '<option value="' + selectedLoc + '" selected>Loc #' + selectedLoc + ' (0)</option>';
+                var nm = locNames[selectedLoc] || ('Loc #' + selectedLoc);
+                html += '<option value="' + selectedLoc + '" selected>'
+                      + escapeHtml(locked ? nm : nm + ' (0)') + '</option>';
             }
             return html;
         }
@@ -3138,7 +3276,7 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
             entries.forEach(function (e, idx) {
                 html += '<tr>'
                     + '<td style="padding:1px 2px;"><select class="no-combobox shr-src-loc" data-idx="' + idx
-                        + '" style="width:100%;">' + srcLocOptions(locs, e.loc) + '</select></td>'
+                        + '" style="width:100%;">' + srcLocOptions(locs, e.loc, row._srcLocked) + '</select></td>'
                     + '<td style="padding:1px 2px;width:70px;"><input class="shr-src-qty r" type="number" '
                         + 'step="0.001" min="0" data-idx="' + idx + '" value="' + (e.qty ? fmtQty(e.qty) : '')
                         + '" placeholder="qty" style="width:100%;"></td>'
@@ -3255,22 +3393,44 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
         // Retained hook — the widget manages its own state now.
         function syncRow(row) { /* no-op: kept for call sites */ }
 
-        // Lock an already-shipped ship row so the shipped entry can't change.
-        // Text inputs go readonly (so they still POST and keep the parallel
-        // arrays aligned); pointer-events are killed via the CSS class. The
-        // server also refuses to rewrite a shipped line, so this is UX only.
-        function lockShippedRow(row) {
+        // Lock a row whose event is already posted — a shipped ship line or a
+        // received receive line — so the historical entry can't change. `kind`
+        // is 'shipped' or 'received' and only picks the wording. Text inputs go
+        // readonly (so they still POST and keep the parallel arrays aligned);
+        // pointer-events are killed via the CSS class. The server also refuses
+        // to rewrite or drop such a line, so this is UX only.
+        function lockPostedRow(row, kind) {
             row._srcLocked = true;
             row.querySelectorAll('input, textarea').forEach(function (inp) {
                 inp.readOnly = true;
             });
+            // readOnly does nothing on a <select>, and the CSS pointer-events
+            // guard only stops the mouse — the item/UOM of a shipped line could
+            // still be changed by keyboard. Disable them for real, and mirror
+            // each value into a hidden input carrying the same name so the row
+            // keeps POSTing and the parallel line_* arrays stay aligned.
+            row.querySelectorAll('select').forEach(function (sel) {
+                sel.disabled = true;
+                var nm = sel.getAttribute('name');
+                if (!nm) return;             // e.g. the unnamed subtype picker
+                sel.removeAttribute('name'); // a disabled select posts nothing anyway
+                var mirror = document.createElement('input');
+                mirror.type  = 'hidden';
+                mirror.name  = nm;
+                mirror.value = sel.value;
+                mirror.setAttribute('data-lock-mirror', '1');
+                sel.parentNode.insertBefore(mirror, sel.nextSibling);
+            });
             var rm = row.querySelector('.shr-line-remove');
-            if (rm) { rm.disabled = true; rm.title = 'Already shipped — cannot remove'; }
+            if (rm) {
+                rm.disabled = true;
+                rm.title = 'Already ' + kind + ' — cannot remove. Add a new line instead.';
+            }
             var typeCell = row.querySelector('td');
-            if (typeCell && !typeCell.querySelector('.shr-shipped-badge')) {
+            if (typeCell && !typeCell.querySelector('.shr-line-badge')) {
                 var badge = document.createElement('span');
-                badge.className = 'shr-shipped-badge';
-                badge.textContent = 'shipped';
+                badge.className = 'shr-line-badge';
+                badge.textContent = kind;
                 typeCell.appendChild(badge);
             }
         }
@@ -3280,7 +3440,8 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
             row._wired = true;
             // Flag locked BEFORE the source widget builds so it renders
             // read-only and skips the over/short validation.
-            if (row.getAttribute('data-shipped') === '1') lockShippedRow(row);
+            var lockKind = row.getAttribute('data-locked');
+            if (lockKind) lockPostedRow(row, lockKind);
             syncRow(row);
 
             // Build the multi-location source widget for ship rows. New rows
@@ -3358,9 +3519,30 @@ if ($action === 'new' || $action === 'edit' || $action === 'amend') {
                 var kindHid = tmpl.querySelector('.shr-line-kind');
                 if (kindHid) kindHid.value = (tbodyEl === shipBody) ? 'ship' : 'receive';
             }
+            // A new row has no posted event, but the template may have been
+            // cloned from a locked one (the borrow-from-the-other-section path).
+            // Undo the lock first: drop the hidden name-mirrors and give each
+            // select its name back, otherwise the clone would post the name
+            // twice and knock the parallel line_* arrays out of alignment.
+            tmpl.removeAttribute('data-locked');
+            tmpl.classList.remove('shr-line-locked');
+            tmpl._srcLocked = false;
+            var badge = tmpl.querySelector('.shr-line-badge');
+            if (badge) badge.parentNode.removeChild(badge);
+            // The lock disables this; a fresh row must always be removable.
+            var rmBtn = tmpl.querySelector('.shr-line-remove');
+            if (rmBtn) { rmBtn.disabled = false; rmBtn.title = 'Remove'; }
+            tmpl.querySelectorAll('input[data-lock-mirror]').forEach(function (m) {
+                var sel = m.previousElementSibling;
+                if (sel && sel.tagName === 'SELECT' && !sel.getAttribute('name')) {
+                    sel.setAttribute('name', m.getAttribute('name'));
+                }
+                m.parentNode.removeChild(m);
+            });
             // Clear user-entered values.
             tmpl.querySelectorAll('input').forEach(function (inp) {
                 if (inp.type === 'number' || inp.type === 'text' || inp.type === 'date') inp.value = '';
+                inp.readOnly = false;
             });
             // Reset line_id to 0 so save handler INSERTs instead of UPDATEs.
             var lidInput = tmpl.querySelector('input[name="line_id[]"]');
@@ -4825,7 +5007,17 @@ foreach (db_all("SELECT DISTINCT entity_id FROM notes WHERE entity_type = 'shr_l
 }
 $noteLineIds  = array_values(array_unique(array_filter(array_map('intval', $noteLineIds), function ($v) { return $v > 0; })));
 $noteIdList   = !empty($noteLineIds) ? implode(',', $noteLineIds) : '0';
-$hasNotesExpr = "(CASE WHEN e.shipment_line_id IN ($noteIdList) THEN 1 ELSE 0 END)";
+// Per-RECEIPT composer notes live under entity_type 'shr_txn', keyed on the
+// internal txn id (inv_txns.id). A receipt row carries that same id as
+// e.inv_txn_id, so match it there — that's what lets a note on one receipt of
+// a multi-receipt line light up ONLY that receipt row, not every row of the line.
+$noteTxnIds = [];
+foreach (db_all("SELECT DISTINCT entity_id FROM notes WHERE entity_type = 'shr_txn' AND is_deleted = 0") as $nr) {
+    $noteTxnIds[] = (int)$nr['entity_id'];
+}
+$noteTxnIds   = array_values(array_filter($noteTxnIds, function ($v) { return $v > 0; }));
+$noteTxnList  = !empty($noteTxnIds) ? implode(',', $noteTxnIds) : '0';
+$hasNotesExpr = "(CASE WHEN e.shipment_line_id IN ($noteIdList) OR e.inv_txn_id IN ($noteTxnList) THEN 1 ELSE 0 END)";
 
 $dtCfg = [
     'id'       => 'shiprcpt_txn_history',
@@ -4904,10 +5096,13 @@ $dtCfg = [
 // AFTER data_table_run() returns (it knows the page slice); the renderer
 // reads them by reference, so the order of assignment is fine.
 //   $shrNoteCounts     — new shr_line composer notes  (entity_type 'shr_line')
+//   $shrTxnCounts      — new shr_txn composer notes   (entity_type 'shr_txn',
+//                        keyed on the internal txn id — for receipt rows)
 //   $lineLegacyCounts  — legacy imported notes for the line (read-only popup)
 $shrNoteCounts    = [];
+$shrTxnCounts     = [];
 $lineLegacyCounts = [];
-$rowRenderer = function ($r) use ($canManage, &$shrNoteCounts, &$lineLegacyCounts) {
+$rowRenderer = function ($r) use ($canManage, &$shrNoteCounts, &$shrTxnCounts, &$lineLegacyCounts) {
     // Direction pill — three flavors now.
     //   receive  → green: material arrived
     //   ship_out → amber: material dispatched
@@ -5035,42 +5230,55 @@ $rowRenderer = function ($r) use ($canManage, &$shrNoteCounts, &$lineLegacyCount
                   . '">✎ <span class="dt-action-label">Edit</span></a>';
     }
 
-    // Running notes — opens the standard composer (body + file attachments)
-    // for THIS transaction line (entity_type 'shr_line' / entity_id =
-    // shipment_line_id), so a note maps to the line's inventory item, not the
-    // whole shipment. The count is batch-prefilled in $shrNoteCounts (see
-    // below); on the datatable AJAX rows path that prefill hasn't run yet, so
-    // fall back to a per-line lookup. Add the same control to the gear menu
-    // for discoverability (the NOTES/ATTACHMENTS column carries it too).
+    // Running notes — opens the standard composer (body + file attachments).
+    // The note TARGET depends on the row:
+    //   • Receipt rows carry a specific internal txn id (inv_receipts.txn_id).
+    //     A single shipment LINE can be received in several receipts, so keying
+    //     on the line would leak a note across every receipt of that line.
+    //     Key those on the internal txn instead — entity_type 'shr_txn',
+    //     entity_id = inv_txns.id — so each receipt (each Internal Txn ID) has
+    //     its own notes.
+    //   • Every other row (ship-out, planned, imported receipt) has no single
+    //     txn, so it stays line-keyed — entity_type 'shr_line'.
+    // Counts are batch-prefilled ($shrNoteCounts / $shrTxnCounts); on the
+    // datatable AJAX rows path the prefill hasn't run yet, so fall back to a
+    // per-entity lookup. The gear menu carries the same control.
     $shrLineId = (int)($r['shipment_line_id'] ?? 0);
-    if ($shrLineId > 0) {
-        if (!array_key_exists($shrLineId, $shrNoteCounts)) {
-            $one = notes_counts_for('shr_line', [$shrLineId]);
-            $shrNoteCounts[$shrLineId] = $one[$shrLineId] ?? 0;
+    $invTxnId  = (int)($r['inv_txn_id'] ?? 0);
+    $noteByTxn = ($r['direction'] === 'receive' && $invTxnId > 0);
+    $noteType  = $noteByTxn ? 'shr_txn' : 'shr_line';
+    $noteId    = $noteByTxn ? $invTxnId : $shrLineId;
+
+    // New composer-note count for this row's target (txn- or line-keyed).
+    $newCount = 0;
+    if ($noteId > 0) {
+        if ($noteByTxn) {
+            if (!array_key_exists($noteId, $shrTxnCounts)) {
+                $one = notes_counts_for('shr_txn', [$noteId]);
+                $shrTxnCounts[$noteId] = $one[$noteId] ?? 0;
+            }
+            $newCount = (int)$shrTxnCounts[$noteId];
+        } else {
+            if (!array_key_exists($noteId, $shrNoteCounts)) {
+                $one = notes_counts_for('shr_line', [$noteId]);
+                $shrNoteCounts[$noteId] = $one[$noteId] ?? 0;
+            }
+            $newCount = (int)$shrNoteCounts[$noteId];
         }
-        $actions .= ' ' . notes_popup_menu_item('shr_line', $shrLineId, 'Notes', $shrNoteCounts[$shrLineId]);
+        $actions .= ' ' . notes_popup_menu_item($noteType, $noteId, 'Notes', $newCount);
     }
 
     $lineCount    = (int)($r['line_count'] ?? 0);
     $receiptCount = (int)($r['receipt_count'] ?? 0);
 
-    // Notes/Attachments — PER LINE (not per shipment). Two affordances:
-    //   📝 editable — opens the standard composer modal for this line
-    //      (entity_type 'shr_line'); add a note + file attachments, or read
-    //      existing ones. Shown to managers always (so they can add) and to
-    //      everyone when the line already has notes (so they can read).
-    //   📎 legacy   — read-only popup of notes imported from the old system
-    //      for THIS line (keyed by data-line-id). Only when that line has any.
-    // Counts are batch-prefilled for the initial render; on the datatable AJAX
-    // rows path the prefill hasn't run, so fall back to a per-line lookup.
-    $newCount = 0;
-    if ($shrLineId > 0) {
-        if (!array_key_exists($shrLineId, $shrNoteCounts)) {
-            $one = notes_counts_for('shr_line', [$shrLineId]);
-            $shrNoteCounts[$shrLineId] = $one[$shrLineId] ?? 0;
-        }
-        $newCount = (int)$shrNoteCounts[$shrLineId];
-    }
+    // Notes/Attachments column. Two affordances:
+    //   📝 editable — opens the standard composer modal for this row's note
+    //      target (shr_txn on receipt rows, shr_line otherwise); add a note +
+    //      file attachments, or read existing ones. Shown to managers always
+    //      (so they can add) and to everyone when there are already notes.
+    //   📎 legacy   — read-only popup of notes imported from the old system.
+    //      Legacy notes always roll up PER LINE, so this stays line-keyed even
+    //      on a receipt row. Only shown when that line has any.
     $legCount = 0;
     if ($shrLineId > 0) {
         if (!array_key_exists($shrLineId, $lineLegacyCounts)) {
@@ -5083,12 +5291,16 @@ $rowRenderer = function ($r) use ($canManage, &$shrNoteCounts, &$lineLegacyCount
     $noteBtnStyle = 'background:none;border:none;padding:0;cursor:pointer;'
                   . 'font:inherit;line-height:1;white-space:nowrap;color:#1d4ed8;';
     $parts = [];
-    if ($shrLineId > 0 && ($canManage || $newCount > 0)) {
+    if ($noteId > 0 && ($canManage || $newCount > 0)) {
         $badge = $newCount > 0 ? '&nbsp;<span class="shr-notes-badge">' . $newCount . '</span>' : '';
+        $noteTitle = $noteByTxn
+            ? ($canManage ? 'View / add notes &amp; attachments for this receipt (internal txn)'
+                          : 'View notes for this receipt (internal txn)')
+            : ($canManage ? 'View / add notes &amp; attachments for this line'
+                          : 'View notes for this line');
         $parts[] = '<button type="button" class="notes-popup-btn" style="' . $noteBtnStyle . '"'
-                 . ' data-entity-type="shr_line" data-entity-id="' . $shrLineId . '"'
-                 . ' title="' . ($canManage ? 'View / add notes &amp; attachments for this line'
-                                            : 'View notes for this line') . '">'
+                 . ' data-entity-type="' . $noteType . '" data-entity-id="' . $noteId . '"'
+                 . ' title="' . $noteTitle . '">'
                  . '📝' . $badge . '</button>';
     }
     if ($shrLineId > 0 && $legCount > 0) {
@@ -5144,11 +5356,22 @@ $pageLineIds = array_values(array_filter(
     array_map('intval', array_column($dt['rows'], 'shipment_line_id')),
     function ($v) { return $v > 0; }
 ));
-$shrNoteCounts    = notes_counts_for('shr_line', $pageLineIds);   // new composer notes
-$lineLegacyCounts = shr_line_txn_note_counts($pageLineIds);       // imported legacy notes
+// Internal-txn ids of the receipt rows on this page — for the per-receipt
+// ('shr_txn') composer-note counts. Dedupe: several receipts share nothing
+// here, but a defensive unique keeps the IN-list tidy.
+$pageTxnIds = array_values(array_unique(array_filter(
+    array_map('intval', array_column($dt['rows'], 'inv_txn_id')),
+    function ($v) { return $v > 0; }
+)));
+$shrNoteCounts    = notes_counts_for('shr_line', $pageLineIds);   // new per-LINE composer notes
+$shrTxnCounts     = notes_counts_for('shr_txn',  $pageTxnIds);    // new per-RECEIPT composer notes
+$lineLegacyCounts = shr_line_txn_note_counts($pageLineIds);       // imported legacy notes (per line)
 foreach ($pageLineIds as $lid) {
     if (!array_key_exists($lid, $shrNoteCounts))    $shrNoteCounts[$lid]    = 0;
     if (!array_key_exists($lid, $lineLegacyCounts)) $lineLegacyCounts[$lid] = 0;
+}
+foreach ($pageTxnIds as $tid) {
+    if (!array_key_exists($tid, $shrTxnCounts)) $shrTxnCounts[$tid] = 0;
 }
 
 $newBtnHtml = $canManage

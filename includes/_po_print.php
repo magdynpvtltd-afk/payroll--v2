@@ -495,13 +495,14 @@ function po_render_print_html($poId, array $opts = [])
 
 <div style="font-size:12px; font-weight:bold; margin-bottom:6px;">Input Material Issued</div>
 <table class="imt-tbl">
-    <colgroup><col style="width:6%;"><col style="width:66%;"><col style="width:10%;"><col style="width:18%;"></colgroup>
+    <colgroup><col style="width:6%;"><col style="width:56%;"><col style="width:10%;"><col style="width:10%;"><col style="width:18%;"></colgroup>
     <thead>
         <tr>
-            <th>Sl.</th>
-            <th>Part No. and Description of Material</th>
-            <th>Qty.</th>
-            <th>Date</th>
+            <th style="width:6%;">Sl.</th>
+            <th style="width:56%;">Part No. and Description of Material</th>
+            <th style="width:10%;">Qty.</th>
+            <th style="width:10%;">UOM</th>
+            <th style="width:18%;">Issue Before</th>
         </tr>
     </thead>
     <tbody>
@@ -520,21 +521,26 @@ function po_render_print_html($poId, array $opts = [])
             $issuedQty = (float)($l['qty_shipped'] ?? 0);
             if ($issuedQty <= 0) $issuedQty = (float)($l['qty_planned'] ?? 0);
             $qty  = rtrim(rtrim(number_format($issuedQty, 2), '0'), '.');
+            // Ship lines carry their date in before_date ("issue before"); only
+            // receive lines use delivery_date. Reading delivery_date here left
+            // the column permanently blank.
+            $rawDate  = !empty($l['before_date']) ? $l['before_date'] : ($l['delivery_date'] ?? '');
             $lineDate = '';
-            if (!empty($l['delivery_date'])) {
-                $dts = strtotime((string)$l['delivery_date']);
-                $lineDate = $dts ? date('d-M-Y', $dts) : h($l['delivery_date']);
+            if (!empty($rawDate)) {
+                $dts = strtotime((string)$rawDate);
+                $lineDate = $dts ? date('d-M-Y', $dts) : h($rawDate);
             }
         ?>
             <tr>
                 <td class="c"><?= ++$imIdx ?></td>
                 <td><?= h($code) ?><?= $desc ? ' ' . h($desc) : '' ?></td>
                 <td class="c"><?= h($qty) ?></td>
+                <td class="c"><?= h($l['uom_label'] ?? '') ?: '—' ?></td>
                 <td class="c"><?= $lineDate ?></td>
             </tr>
         <?php endforeach; ?>
         <?php if ($imIdx === 0): ?>
-            <tr><td class="c">&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>
+            <tr><td class="c">&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>
         <?php endif; ?>
     </tbody>
 </table>

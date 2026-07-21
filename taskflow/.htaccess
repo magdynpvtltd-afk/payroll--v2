@@ -1,0 +1,25 @@
+# TaskFlow — Apache config for the app root.
+
+Options -Indexes
+DirectoryIndex index.php
+
+# Block direct download of the schema and this config.
+<FilesMatch "\.(sql|md)$">
+  Require all denied
+</FilesMatch>
+
+# Service worker must be served from the app root to control the whole scope.
+<IfModule mod_headers.c>
+  <FilesMatch "service-worker\.js$">
+    Header set Service-Worker-Allowed "/"
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+  Header set X-Content-Type-Options "nosniff"
+  Header set X-Frame-Options "SAMEORIGIN"
+  Header set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+<IfModule mod_mime.c>
+  AddType application/manifest+json .webmanifest
+  AddType image/svg+xml .svg
+</IfModule>

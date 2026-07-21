@@ -26,10 +26,12 @@ require_login();
 
 $attId = (int)input('att_id', 0);
 // Which attachment endpoint to fetch from. 'note' → /note_attach.php
-// (running notes), 'inspection' → /inspection_attach.php. Defaults to
-// note for backward compatibility.
+// (running notes), 'inspection' → /inspection_attach.php,
+// 'taskflow' → /taskflow/attachment.php. Defaults to note for
+// backward compatibility. All three share the same login session, so a
+// browser-credentialed fetch to any of them reuses the current user.
 $src = (string)input('src', 'note');
-if (!in_array($src, ['note', 'inspection'], true)) $src = 'note';
+if (!in_array($src, ['note', 'inspection', 'taskflow'], true)) $src = 'note';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -2394,7 +2396,9 @@ if (window.ResizeObserver) {
   // session cookies automatically; if the user can't view the
   // attachment the endpoint returns 403 and we surface a load error.
   const base = (cfg.base || '').replace(/\/+$/, '');
-  const endpoint = cfg.src === 'inspection' ? '/inspection_attach.php' : '/note_attach.php';
+  const endpoint = cfg.src === 'inspection' ? '/inspection_attach.php'
+                 : cfg.src === 'taskflow'   ? '/taskflow/attachment.php'
+                 : '/note_attach.php';
   const url  = base + endpoint + '?id=' + encodeURIComponent(cfg.att_id);
 
   // Hide the drop UI immediately and show a loading state.

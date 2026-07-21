@@ -7,6 +7,17 @@
  *   $focus_id    — string  (id of element to autofocus on page load)
  *   $page_module — string  (e.g. 'users') — used to highlight sidebar
  *
+ * The remaining hooks exist so a page hosted by a SIBLING app in this codebase
+ * (TaskFlow, at /taskflow/) can wear this sidebar without giving up its own
+ * assets or PWA identity — see taskflow/magdyn_chrome.php. Every one of them
+ * defaults to exactly what MagDyn's own pages rendered before they existed:
+ *
+ *   $page_css_first    — array of stylesheet paths emitted BEFORE MagDyn's.
+ *   $page_head_html    — raw HTML appended to <head>.
+ *   $page_manifest_url — overrides the PWA manifest link.
+ *   $page_icon_url     — overrides the favicon / apple-touch-icon.
+ *   $page_theme_color  — overrides the theme-color meta.
+ *
  * Created: 20260515_060024_IST
  */
 $APP = $GLOBALS['APP'];
@@ -18,16 +29,33 @@ $realUser  = real_user();
 $modules   = visible_modules();
 $navTree   = visible_module_tree();
 $flashes   = flash_pull();
+
+// Page stylesheets that must load BEFORE ours. TaskFlow and MagDyn happen to
+// share two dozen class names (.brand, .btn, .card, .pill, .muted …), so
+// whichever sheet loads last wins them. Ours going last is the whole point of
+// borrowing this chrome: the sidebar keeps MagDyn's look, and the borrowing
+// page's own non-colliding rules still apply.
+$cssFirst = isset($page_css_first) ? (array)$page_css_first : [];
+
+// PWA identity. A borrowed-chrome page keeps its OWN manifest/icon/colour:
+// TaskFlow is a separately installable PWA, and pointing one of its pages at
+// MagDyn's manifest would re-identify the installed app mid-session.
+$iconUrl     = isset($page_icon_url)     ? $page_icon_url     : url('/assets/img/icon-192.png');
+$manifestUrl = isset($page_manifest_url) ? $page_manifest_url : url('/manifest.php');
+$themeColor  = isset($page_theme_color)  ? $page_theme_color  : $APP['pwa']['theme_color'];
 ?><!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= h($pageTitle ? ($pageTitle . ' · ' . $APP['app_name']) : $APP['app_name']) ?></title>
-    <link rel="icon" href="<?= url('/assets/img/icon-192.png') ?>">
-    <link rel="apple-touch-icon" href="<?= url('/assets/img/icon-192.png') ?>">
-    <link rel="manifest" href="<?= url('/manifest.php') ?>">
-    <meta name="theme-color" content="<?= h($APP['pwa']['theme_color']) ?>">
+    <link rel="icon" href="<?= h($iconUrl) ?>">
+    <link rel="apple-touch-icon" href="<?= h($iconUrl) ?>">
+    <link rel="manifest" href="<?= h($manifestUrl) ?>">
+    <meta name="theme-color" content="<?= h($themeColor) ?>">
+    <?php foreach ($cssFirst as $css): ?>
+        <link rel="stylesheet" href="<?= h(asset_url($css)) ?>">
+    <?php endforeach; ?>
     <link rel="stylesheet" href="<?= h(asset_url('/assets/css/magdyn-base.css')) ?>">
     <link rel="stylesheet" href="<?= h(asset_url('/assets/css/app.css')) ?>">
     <?php if ($focusId): ?>
@@ -73,6 +101,7 @@ $flashes   = flash_pull();
         } catch (e) {}
     })();
     </script>
+    <?= isset($page_head_html) ? $page_head_html : '' ?>
 </head>
 <body<?= !empty($page_body_class) ? ' class="' . h($page_body_class) . '"' : '' ?>>
 <div class="layout">
@@ -89,15 +118,22 @@ $flashes   = flash_pull();
             <?php foreach ($navTree as $entry): ?>
                 <?php if ($entry['type'] === 'module'):
                     $m = $entry['data']; $code = $m['code'];
+                    // virtual_url overrides the default /<code>.php route, exactly
+                    // as it does for group children below — a top-level module can
+                    // point at a query-string view or a sibling app (TaskFlow).
+                    $vu = !empty($m['virtual_url']) ? $m['virtual_url']
+                        : (!empty($m['_virtual_url']) ? $m['_virtual_url'] : '');
+                    $href = $vu !== '' ? url($vu) : route($code, 'index');
                     $chord = $m['shortcut'];
                     // accesskey is single-char only; use it only when our chord
                     // is also single-char to avoid contention with chord mode.
                     $accesskey = (strlen($chord) === 1) ? strtolower($chord) : ''; ?>
                     <a class="nav-item<?= $module === $code ? ' active' : '' ?>"
-                       href="<?= h(route($code, 'index')) ?>"
+                       href="<?= h($href) ?>"
                        title="<?= h($m['name']) ?>"
                        data-shortcut="<?= h($chord) ?>"
                        <?= $accesskey ? 'accesskey="' . h($accesskey) . '"' : '' ?>
+                       <?= nav_url_leaves_app($vu) ? 'data-no-spa' : '' ?>
                        tabindex="0">
                         <span class="nav-icon"><?= h(module_icon($code, $m['icon'])) ?></span>
                         <span class="nav-label"><?= shortcut_label($m['name'], $chord) ?></span>
@@ -170,6 +206,7 @@ $flashes   = flash_pull();
                                     ?>
                                         <a class="nav-item nav-child nav-grandchild<?= $module === $sgcode ? ' active' : '' ?>"
                                            href="<?= h($sgHref) ?>"
+                                           <?= nav_url_leaves_app($sgvu) ? 'data-no-spa' : '' ?>
                                            tabindex="0">
                                             <span class="nav-icon"><?= h(module_icon($sgcode, $sgm['icon'])) ?></span>
                                             <span class="nav-label"><?= h($sgm['name']) ?></span>
@@ -198,6 +235,7 @@ $flashes   = flash_pull();
                                    href="<?= h($childHref) ?>"
                                    data-shortcut="<?= h($cchord) ?>"
                                    <?= $cak ? 'accesskey="' . h($cak) . '"' : '' ?>
+                                   <?= nav_url_leaves_app($vu) ? 'data-no-spa' : '' ?>
                                    tabindex="0">
                                     <span class="nav-icon"><?= h(module_icon($code, $m['icon'])) ?></span>
                                     <span class="nav-label"><?= shortcut_label($m['name'], $visibleChord) ?></span>

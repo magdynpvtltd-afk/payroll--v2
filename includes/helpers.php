@@ -39,6 +39,27 @@ function asset_url($path)
 }
 
 /**
+ * True when a module's virtual_url points somewhere that ISN'T one of our
+ * own pages — a sibling app with its own <head>/<main> (TaskFlow), or an
+ * absolute URL on another host.
+ *
+ * Every MagDyn page is a flat .php file at the app root (see route() /
+ * _routed_modules() below), so any other shape is foreign. Such sidebar
+ * links must opt out of the SPA router: it fetches the target and splices
+ * that page's <main> into OUR shell, which would strip a foreign app of
+ * its own CSS and JS and leave it wearing MagDyn's sidebar.
+ */
+function nav_url_leaves_app($virtualUrl)
+{
+    $vu = trim((string)$virtualUrl);
+    if ($vu === '') return false;
+    // Absolute URL (http://, https://, //host/...) — always foreign.
+    if (preg_match('#^([a-z][a-z0-9+.\-]*:)?//#i', $vu)) return true;
+    $path = explode('?', $vu, 2)[0];
+    return !preg_match('#^/[^/]+\.php$#i', $path);
+}
+
+/**
  * Build a URL to a module page.
  *
  * MagDyn uses flat per-page PHP files at the app root for built-out modules,
@@ -118,11 +139,19 @@ function _routed_modules()
     ];
 }
 
-/** Redirect helper */
-function redirect($to)
-{
-    header('Location: ' . $to);
-    exit;
+/**
+ * Redirect helper.
+ *
+ * Guarded so TaskFlow can borrow MagDyn's chrome (see
+ * taskflow/magdyn_chrome.php). TaskFlow declares an identical redirect()
+ * first; either one is a Location header plus exit.
+ */
+if (!function_exists('redirect')) {
+    function redirect($to)
+    {
+        header('Location: ' . $to);
+        exit;
+    }
 }
 
 /** Pull a GET/POST value safely */
@@ -347,6 +376,7 @@ function module_icon($code, $fallback = '◆')
         'group_running_notes' => "\xF0\x9F\x93\x9D",              // 📝 U+1F4DD (matches 'running_notes')
         'group_invoice'       => "\xF0\x9F\xA7\xBE",              // 🧾 U+1F9FE
         'group_reports'       => "\xF0\x9F\x93\x8A",              // 📊 U+1F4CA
+        'group_job_order'     => "\xF0\x9F\x92\xBC",              // 💼 U+1F4BC (briefcase — Job Order group: Job Card + ATS)
         'group_tools'         => "\xF0\x9F\xA7\xB0",              // 🧰 U+1F9F0
         'group_dms'           => "\xF0\x9F\x97\x83\xEF\xB8\x8F",  // 🗃️ U+1F5C3 VS16 (card file box — Document Management section)
 
@@ -401,6 +431,7 @@ function module_icon($code, $fallback = '◆')
         'settings'             => "\xE2\x9A\x99",             // ⚙ U+2699 (gear)
         'inventory_shipments_list' => "\xF0\x9F\x93\x8B",     // 📋 U+1F4CB (clipboard)
         'inventory_txn_history'=> "\xF0\x9F\x93\x9C",         // 📜 U+1F4DC (scroll / log)
+        'taskflow'             => "\xE2\x98\x91\xEF\xB8\x8F", // ☑️ U+2611 VS16 (ballot box with check — tasks; the box keeps it apart from inspection's bare ✓)
         'insp_templates'       => "\xF0\x9F\x93\x91",         // 📑 U+1F4D1 (bookmark tabs — template)
         'code_sequences'       => "\xF0\x9F\x94\xA2",         // 🔢 U+1F522 (numeric input symbol)
 

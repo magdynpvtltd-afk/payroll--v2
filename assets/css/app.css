@@ -1131,6 +1131,15 @@ body.spa-loading::after {
 }
 .sidebar.collapsed .logout { font-size: 11px; padding: 6px; }
 
+/* Hover-peek: while a collapsed sidebar is temporarily expanded on
+   hover/focus (data-peek, set by app.js) it carries a soft right-edge
+   shadow so the transient expansion reads as floating over the content
+   rather than a committed layout change. The sidebar's own `transition:
+   width` animates the peek open/closed. */
+.sidebar[data-peek] {
+    box-shadow: 6px 0 24px rgba(0, 0, 0, 0.28);
+}
+
 /* ============================================================
    BOM grid: column resize handles
    Each resizable <th data-bgrid-col> gets a thin handle anchored
@@ -1751,7 +1760,8 @@ body.has-dt-wrap .dt-wrap > .dt-scroll {
     margin-right: 6px;
     flex-shrink: 0;
 }
-.dt-filter-pill .dt-col-filter {
+.dt-filter-pill .dt-col-filter,
+.dt-filter-pill .dt-q {
     flex: 1 1 0;
     width: 100%;
     min-width: 0;
@@ -1762,11 +1772,50 @@ body.has-dt-wrap .dt-wrap > .dt-scroll {
     padding: 4px 0;
     color: var(--text);
 }
-.dt-filter-pill .dt-col-filter::placeholder {
+.dt-filter-pill .dt-col-filter::placeholder,
+.dt-filter-pill .dt-q::placeholder {
     color: var(--text-muted);
     opacity: 0.7;
 }
 .dt-filter-pill .dt-col-filter-select { cursor: pointer; appearance: none; }
+
+/* Table-wide "search all" box that lives in the last column's filter
+   cell. It shares the pill look of the per-column filters but wants a
+   usable minimum width even when the last (Actions) column is narrow.
+   The tfoot td has overflow:visible, so the pill can extend slightly
+   past a very narrow column without being clipped. */
+.dt-globalsearch-pill { min-width: 104px; }
+/* If the last column happens to have its OWN per-column filter too, the
+   search-all pill stacks beneath it instead of overlapping. */
+.dt-filter-pill + .dt-globalsearch-pill { margin-top: 4px; }
+
+/* Mobile-only "Sort by" control in the toolbar. Hidden on desktop, where
+   clicking a column header does the sorting. */
+.dt-mobile-sort { display: none; }
+.dt-mobile-sort .dt-mobile-sort-lbl { color: var(--text-muted); }
+.dt-mobile-sort .dt-sort-select {
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--surface);
+    font-size: 12px;
+    max-width: 46vw;
+}
+.dt-mobile-sort .dt-sort-dir { min-width: 32px; padding: 4px 8px; }
+
+@media (max-width: 720px) {
+    /* Let the toolbar wrap so the extra sort control has room, and give
+       the sort control its own full-width row at the top of the group. */
+    .dt-toolbar { flex-wrap: wrap; row-gap: 8px; }
+    .dt-toolbar-left { flex-wrap: wrap; row-gap: 8px; }
+    .dt-mobile-sort {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        order: -1;
+        flex-basis: 100%;
+    }
+}
 
 /* Hide the old dt-footer (moved up into the toolbar) and the old
    .dt-filterbar (moved into the table as tfoot). */
@@ -2744,6 +2793,40 @@ ul.bd-children:empty {
 .ql-editor { min-height: 80px; padding: 8px 10px; }
 .ql-editor.ql-blank::before { font-style: normal; color: var(--text-muted); }
 
+/* Notes filter bar */
+.notes-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+.notes-filters .notes-filter-q {
+    flex: 1 1 160px;
+    min-width: 120px;
+    padding: 4px 8px;
+    font-size: 12px;
+    min-height: 28px;
+}
+.notes-filters .notes-filter-cat,
+.notes-filters .notes-filter-author {
+    width: auto;
+    max-width: 160px;
+    padding: 4px 8px;
+    font-size: 12px;
+    min-height: 28px;
+}
+.notes-filter-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.notes-filter-check input { margin: 0; }
+.notes-filter-count { margin-left: auto; white-space: nowrap; }
+
 /* Notes list */
 .notes-list { display: flex; flex-direction: column; gap: 10px; }
 .note-item {
@@ -2752,6 +2835,9 @@ ul.bd-children:empty {
     padding: 9px 12px;
     background: var(--surface);
 }
+/* .notes-list is a flex container — make sure filtered-out rows really
+   collapse rather than inheriting a flex-item display. */
+.note-item[hidden] { display: none; }
 .note-head {
     display: flex;
     align-items: center;

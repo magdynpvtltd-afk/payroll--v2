@@ -31,6 +31,33 @@ require_once __DIR__ . '/_codes.php';
     } catch (\Throwable $e) {
         // Non-fatal — table might not exist yet on a fresh install.
     }
+
+    // An amendment keeps the parent's po_no and only bumps version, so
+    // po_no is NOT unique on its own — uniqueness is (po_no, version).
+    // The original schema's uq_po_no made every amendment's INSERT fail.
+    try {
+        $idx = db_all("SHOW INDEX FROM purchase_orders WHERE Key_name = 'uq_po_no'");
+        if (!empty($idx)) {
+            db_exec("ALTER TABLE purchase_orders
+                       DROP INDEX uq_po_no,
+                       ADD UNIQUE KEY uq_po_no_ver (po_no, version)");
+
+            // Repair rows poisoned while uq_po_no was in force: the snapshot
+            // was frozen onto the current version, then the new version's
+            // INSERT threw, so the live PO kept serving the pre-amend lines.
+            // A snapshot is only ever valid on a *superseded* version, so
+            // clear it anywhere no higher version exists.
+            db_exec("UPDATE purchase_orders p
+                       LEFT JOIN purchase_orders n
+                              ON n.shipment_id = p.shipment_id
+                             AND n.version > p.version
+                        SET p.lines_snapshot = NULL
+                      WHERE p.lines_snapshot IS NOT NULL
+                        AND n.id IS NULL");
+        }
+    } catch (\Throwable $e) {
+        // Non-fatal — table might not exist yet on a fresh install.
+    }
 })();
 
 /**
@@ -63,6 +90,24 @@ function po_ensure_for_shipment($shipmentId, $actorId = null, $poNoOverride = nu
     $poNo = ($poNoOverride !== null && trim((string)$poNoOverride) !== '')
         ? substr(trim((string)$poNoOverride), 0, 32)
         : code_next('po');
+
+    // A po_no belongs to exactly one shipment — its versions share the number.
+    // The uq_po_no unique key used to enforce that, but it also blocked
+    // amendments (which reuse the number), so uniqueness is now (po_no,
+    // version). Keep the one-shipment-per-number guarantee here instead: the
+    // old-inventory importer passes the S_Order No as po_no and relies on a
+    // duplicate throwing rather than silently creating a second PO.
+    $clash = db_one(
+        "SELECT shipment_id FROM purchase_orders WHERE po_no = ? LIMIT 1",
+        [$poNo]
+    );
+    if ($clash && (int)$clash['shipment_id'] !== $shipmentId) {
+        throw new \RuntimeException(
+            "PO number '$poNo' already belongs to shipment #" . (int)$clash['shipment_id']
+            . " — refusing to reuse it for shipment #$shipmentId."
+        );
+    }
+
     db_exec(
         "INSERT INTO purchase_orders
             (po_no, shipment_id, vendor_id, version, po_date, created_by)
@@ -116,11 +161,12 @@ function po_load_full($poId)
                     i.code AS item_code, i.name AS item_name,
                     a.asset_tag AS asset_tag,
                     am.name AS asset_model,
-                    COALESCE(u.label, pu.label) AS uom_label
+                    COALESCE(lu.label, u.label, pu.label) AS uom_label
                FROM inv_shipment_lines l
           LEFT JOIN inv_items i  ON i.id = l.item_id
           LEFT JOIN assets    a  ON a.id = l.asset_id
           LEFT JOIN asset_models am ON am.id = a.model_id
+          LEFT JOIN inv_uom   lu ON lu.id = l.uom_id
           LEFT JOIN inv_uom   u  ON u.id = i.uom_id
           LEFT JOIN inv_uom   pu ON pu.id = l.pending_uom_id
               WHERE l.shipment_id = ?
@@ -154,6 +200,10 @@ function po_load_full($poId)
  * Does any line on this shipment have a blank price? Drives the
  * conditional "Before raising Invoice, please share Proforma invoice."
  * system-note banner on the PO and the shipment edit page.
+ *
+ * Only receive lines are priced — ship lines are material issued to the
+ * vendor and never carry a price, so counting them pinned the banner on
+ * permanently for every shipment that issues material.
  */
 function po_has_blank_priced_lines($shipmentId)
 {
@@ -161,7 +211,9 @@ function po_has_blank_priced_lines($shipmentId)
         $n = db_val(
             "SELECT COUNT(*)
                FROM inv_shipment_lines
-              WHERE shipment_id = ? AND (unit_price IS NULL OR unit_price = 0)",
+              WHERE shipment_id = ?
+                AND line_kind = 'receive'
+                AND (unit_price IS NULL OR unit_price = 0)",
             [(int)$shipmentId], 0
         );
         return (int)$n > 0;
@@ -247,11 +299,12 @@ function po_create_amendment_for_shipment($shipmentId, $actorId = null, $preComp
                     i.code AS item_code, i.name AS item_name,
                     a.asset_tag AS asset_tag,
                     am.name AS asset_model,
-                    COALESCE(u.label, pu.label) AS uom_label
+                    COALESCE(lu.label, u.label, pu.label) AS uom_label
                FROM inv_shipment_lines l
           LEFT JOIN inv_items i  ON i.id = l.item_id
           LEFT JOIN assets    a  ON a.id = l.asset_id
           LEFT JOIN asset_models am ON am.id = a.model_id
+          LEFT JOIN inv_uom   lu ON lu.id = l.uom_id
           LEFT JOIN inv_uom   u  ON u.id = i.uom_id
           LEFT JOIN inv_uom   pu ON pu.id = l.pending_uom_id
               WHERE l.shipment_id = ?
@@ -273,24 +326,37 @@ function po_create_amendment_for_shipment($shipmentId, $actorId = null, $preComp
         ], JSON_UNESCAPED_UNICODE);
     }
 
-    db_exec(
-        "UPDATE purchase_orders SET lines_snapshot = ? WHERE id = ?",
-        [$snapshot, (int)$latest['id']]
-    );
-
     // ── Create the new version row — SAME po_no, just version + 1. ──
     $newVersion = (int)$latest['version'] + 1;
     $samePoNo   = $latest['po_no'];   // reuse, do NOT call code_next()
 
-    db_exec(
-        "INSERT INTO purchase_orders
-            (po_no, shipment_id, vendor_id, version, parent_po_id, po_date, created_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [$samePoNo, $shipmentId, (int)$sh['vendor_id'],
-         $newVersion, (int)$latest['id'], date('Y-m-d'),
-         $actorId ? (int)$actorId : null]
-    );
-    $id = (int)db()->lastInsertId();
+    // Freezing the snapshot and creating the successor must be all-or-nothing.
+    // A snapshot without a successor makes po_load_full() serve the pre-amend
+    // lines as if they were current — i.e. the amendment silently disappears
+    // from the PO. Insert first, stamp second, both inside one transaction.
+    $ownTxn = !db()->inTransaction();
+    if ($ownTxn) db()->beginTransaction();
+    try {
+        db_exec(
+            "INSERT INTO purchase_orders
+                (po_no, shipment_id, vendor_id, version, parent_po_id, po_date, created_by)
+              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [$samePoNo, $shipmentId, (int)$sh['vendor_id'],
+             $newVersion, (int)$latest['id'], date('Y-m-d'),
+             $actorId ? (int)$actorId : null]
+        );
+        $id = (int)db()->lastInsertId();
+
+        db_exec(
+            "UPDATE purchase_orders SET lines_snapshot = ? WHERE id = ?",
+            [$snapshot, (int)$latest['id']]
+        );
+        if ($ownTxn) db()->commit();
+    } catch (\Throwable $e) {
+        if ($ownTxn && db()->inTransaction()) db()->rollBack();
+        throw $e;
+    }
+
     return db_one("SELECT * FROM purchase_orders WHERE id = ?", [$id]);
 }
 

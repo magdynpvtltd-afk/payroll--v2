@@ -45,9 +45,22 @@ $viewPerm = [
     // case (drawing PDFs bubbled in from the template editor).
     'inspection'          => ['inspection', 'view'],
     'inspection_template' => ['inspection', 'view'],
+    // Ship & Receipt notes: per-line ('shr_line'), per-receipt ('shr_txn')
+    // and the legacy shipment-level value all read off the same module.
+    'shr_line'  => ['inventory_shiprcpt',   'view'],
+    'shr_txn'   => ['inventory_shiprcpt',   'view'],
+    'shiprcpt'  => ['inventory_shiprcpt',   'view'],
 ];
-$pCheck = $viewPerm[$att['entity_type']] ?? null;
-if (!$pCheck || !permission_check($pCheck[0], $pCheck[1])) {
+// 'document' splits its permissions across two modules by kind; either
+// side's view perm is enough, mirroring notes_can_manage().
+if ($att['entity_type'] === 'document') {
+    $allowed = permission_check('documents_internal', 'view')
+            || permission_check('documents_external', 'view');
+} else {
+    $pCheck  = $viewPerm[$att['entity_type']] ?? null;
+    $allowed = $pCheck && permission_check($pCheck[0], $pCheck[1]);
+}
+if (!$allowed) {
     http_response_code(403);
     echo 'Forbidden.';
     exit;

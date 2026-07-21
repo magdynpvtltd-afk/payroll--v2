@@ -239,11 +239,20 @@ if (!function_exists('qc_release_for_verdict')) {
      *   cancelled -> no move
      *
      * Caller MUST wrap this in a DB transaction so the move and the
-     * inspection-row update commit atomically. Throws on insufficient
-     * stock or missing destination location.
+     * inspection-row update commit atomically. Throws on missing
+     * destination location.
+     *
+     * Cap-release: if QC-Hold no longer holds the full receipt qty
+     * (because process/shipment drew it down before approval), the move
+     * is capped at what is actually available and the shortfall is
+     * appended to the inspection's verdict_notes — the approval still
+     * succeeds instead of failing on "Insufficient stock".
      *
      * Returns an associative array describing what happened:
-     *   ['moved' => bool, 'dst_loc_id' => int|null, 'qty' => float, 'reason' => string]
+     *   ['moved' => bool, 'dst_loc_id' => int|null, 'qty' => float,
+     *    'shortfall' => float, 'reason' => string]
+     *   where 'qty' is the amount actually moved and 'shortfall' is the
+     *   receipt qty that could not be moved (0 in the normal case).
      */
     function qc_release_for_verdict($inspection, $verdict, $reworkDstCode = null)
     {
@@ -328,38 +337,92 @@ if (!function_exists('qc_release_for_verdict')) {
         // Out of LOC-QCH first (negative); then into dst (positive).
         // The 'move' txn_type makes these visible in the ledger as a
         // dedicated movement, not as adjustments.
+        //
+        // Cap-release: process/shipment sometimes draw stock straight out
+        // of LOC-QCH before the inspection is approved, so the full
+        // receipt qty may no longer be sitting in QC-Hold. Rather than
+        // fail the approval on "Insufficient stock", we move whatever is
+        // actually available (min of need and on-hand) and record the
+        // shortfall on the inspection so the variance is visible, not
+        // swallowed. Total stock stays correct (paired move) and QC-Hold
+        // can never be driven negative.
+        $available = (float)db_val(
+            'SELECT qty FROM inv_item_location_stock
+              WHERE item_id = ? AND location_id = ?',
+            [(int)$txn['item_id'], $qchId],
+            0.0
+        );
+        if ($available < 0) $available = 0.0;
+        $moveQty   = min($qty, $available);
+        $shortfall = $qty - $moveQty;
+
         $today = date('Y-m-d');
         $refDoc = ($inspection['code'] ?? '') ? ('QC-' . $inspection['code']) : null;
         $note = sprintf(
             'QC release [%s] inspection %s', $verdict, $inspection['code'] ?? '?'
         );
 
-        $headerOut = inv_post_txn(
-            'move', $today,
-            (int)$txn['item_id'], $qchId, -$qty,
-            null, $refDoc, $note
-        );
-        inv_post_txn(
-            'move', $today,
-            (int)$txn['item_id'], $dstId, +$qty,
-            (int)$headerOut['txn_id'], $refDoc, $note
-        );
+        // Only post a movement when there is something to move. A zero
+        // move would just write two 0-delta ledger rows for no reason.
+        if ($moveQty > 0.0001) {
+            $headerOut = inv_post_txn(
+                'move', $today,
+                (int)$txn['item_id'], $qchId, -$moveQty,
+                null, $refDoc, $note
+            );
+            inv_post_txn(
+                'move', $today,
+                (int)$txn['item_id'], $dstId, +$moveQty,
+                (int)$headerOut['txn_id'], $refDoc, $note
+            );
+        }
+
+        // Human-readable qty formatter — trims trailing zeros so the note
+        // reads "released 9 of 11", not "9.000 of 11.000".
+        $fmtQty = function ($v) {
+            return rtrim(rtrim(number_format((float)$v, 3, '.', ''), '0'), '.');
+        };
 
         $uid = function_exists('current_user_id') ? (int)current_user_id() : null;
-        db_exec(
-            'UPDATE inspections
-                SET qc_release_done   = 1,
-                    qc_release_loc_id = ?,
-                    qc_release_at     = NOW(),
-                    qc_release_by     = ?
-              WHERE id = ?',
-            [$dstId, $uid, (int)$inspection['id']]
-        );
 
-        $out['moved']      = true;
+        // Record the shortfall explicitly on the inspection so the
+        // variance between what was inspected and what was releasable is
+        // visible in the report, not silently swallowed.
+        if ($shortfall > 0.0001) {
+            $shortNote = sprintf(
+                'QC release variance: moved %s of %s to %s — %s already consumed/shipped from QC-Hold before approval.',
+                $fmtQty($moveQty), $fmtQty($qty), $dstCode, $fmtQty($shortfall)
+            );
+            db_exec(
+                "UPDATE inspections
+                    SET qc_release_done   = 1,
+                        qc_release_loc_id = ?,
+                        qc_release_at     = NOW(),
+                        qc_release_by     = ?,
+                        verdict_notes     = TRIM(BOTH '\n' FROM CONCAT(COALESCE(verdict_notes, ''), '\n', ?))
+                  WHERE id = ?",
+                [$dstId, $uid, $shortNote, (int)$inspection['id']]
+            );
+        } else {
+            db_exec(
+                'UPDATE inspections
+                    SET qc_release_done   = 1,
+                        qc_release_loc_id = ?,
+                        qc_release_at     = NOW(),
+                        qc_release_by     = ?
+                  WHERE id = ?',
+                [$dstId, $uid, (int)$inspection['id']]
+            );
+        }
+
+        $out['moved']      = ($moveQty > 0.0001);
         $out['dst_loc_id'] = $dstId;
-        $out['qty']        = $qty;
-        $out['reason']     = 'released to ' . $dstCode;
+        $out['qty']        = $moveQty;
+        $out['shortfall']  = $shortfall;
+        $out['reason']     = $shortfall > 0.0001
+            ? sprintf('released %s of %s to %s (%s short)',
+                      $fmtQty($moveQty), $fmtQty($qty), $dstCode, $fmtQty($shortfall))
+            : 'released to ' . $dstCode;
         return $out;
     }
 }

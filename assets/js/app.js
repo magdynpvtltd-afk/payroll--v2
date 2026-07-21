@@ -257,6 +257,82 @@
 })();
 
 /* ============================================================
+   Collapsed sidebar: peek-on-hover.
+
+   When the sidebar is in its persistent collapsed (icon-rail)
+   state, hovering it — or moving keyboard focus into it —
+   expands it to full width, and moving the cursor away collapses
+   it back.
+
+   It only borrows the existing expanded look: on peek we drop the
+   `.collapsed` class off the <aside> (so every expanded rule and
+   the width transition apply for free) and restore it on leave.
+   The SAVED preference is deliberately untouched — html's
+   `.sidebar-collapsed` marker, localStorage, and the toggle glyph
+   all stay as they were — so this is a transient peek, not a mode
+   change, and the collapse button still reflects the real state.
+
+   The cursor leaving is AUTHORITATIVE: mouseleave always collapses
+   (while the bar is persistently collapsed), even if something
+   inside still holds keyboard focus — otherwise clicking a nav
+   item or the collapse button, then moving the mouse away, would
+   leave the bar stuck open. Focus can expand it and hold it open,
+   but only until focus leaves the sidebar, and it never blocks a
+   mouse-leave collapse.
+   ============================================================ */
+(function () {
+    var html = document.documentElement;
+    // Hover peek needs a real pointer: on touch a tap fires mouseenter
+    // with no matching mouseleave, which would leave the bar stuck open.
+    // Keyboard focus still expands it everywhere (handled below).
+    var canHover = !window.matchMedia
+        || window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+    function bind(sidebar) {
+        if (!sidebar || sidebar.__peekBound) return;
+        sidebar.__peekBound = true;
+
+        // Directly drive the peek. No-op unless the bar is PERSISTENTLY
+        // collapsed, so a normally-expanded sidebar is never touched.
+        function setPeek(open) {
+            if (!html.classList.contains('sidebar-collapsed')) {
+                sidebar.removeAttribute('data-peek');
+                return;
+            }
+            if (open) {
+                sidebar.classList.remove('collapsed');   // full width + labels
+                sidebar.setAttribute('data-peek', '1');
+            } else {
+                sidebar.classList.add('collapsed');      // back to the icon rail
+                sidebar.removeAttribute('data-peek');
+            }
+        }
+
+        if (canHover) {
+            sidebar.addEventListener('mouseenter', function () { setPeek(true); });
+            // Cursor away → collapse, unconditionally (see header note).
+            sidebar.addEventListener('mouseleave', function () { setPeek(false); });
+        }
+        // Keyboard: expand while focus is inside; collapse only once focus
+        // leaves the sidebar entirely. focusout fires before focus lands, so
+        // the incoming node is on relatedTarget (document.activeElement is
+        // still stale here). Guarding on relatedTarget also means tabbing
+        // BETWEEN items inside the bar doesn't flicker it closed.
+        sidebar.addEventListener('focusin', function () { setPeek(true); });
+        sidebar.addEventListener('focusout', function (e) {
+            if (!e.relatedTarget || !sidebar.contains(e.relatedTarget)) setPeek(false);
+        });
+    }
+
+    function init() {
+        var bars = document.querySelectorAll('.sidebar');
+        for (var i = 0; i < bars.length; i++) bind(bars[i]);
+    }
+    if (document.readyState !== 'loading') init();
+    else document.addEventListener('DOMContentLoaded', init);
+})();
+
+/* ============================================================
    Prevent double form submission.
    Guards every mutating (non-GET) form against a second submit
    caused by a double-click, Enter-key spam, or an impatient

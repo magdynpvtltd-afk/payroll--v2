@@ -84,13 +84,20 @@ function require_permission($module, $action)
  * permission a non-admin role might also hold — e.g. the "Import from Old
  * Inventory" buttons, which are now reachable only through the Admin ▸
  * Old Inventory Import hub.
+ *
+ * Guarded so TaskFlow can borrow MagDyn's chrome (see
+ * taskflow/magdyn_chrome.php). TaskFlow declares its own is_admin() first and
+ * it answers the same question the same way — it reads current_user()['role'],
+ * which TaskFlow derives from this very 'admin' role code in user_roles.
  */
-function is_admin()
-{
-    foreach (current_user_roles() as $r) {
-        if (($r['code'] ?? '') === 'admin') return true;
+if (!function_exists('is_admin')) {
+    function is_admin()
+    {
+        foreach (current_user_roles() as $r) {
+            if (($r['code'] ?? '') === 'admin') return true;
+        }
+        return false;
     }
-    return false;
 }
 
 /** Returns role rows for current user. */

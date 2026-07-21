@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 722 586" width="722" height="586" role="img" aria-label="Mag Dyn">
+  <defs>
+    <style>
+      .wm { fill:#fff; font-family:"Arial Black","Arial Narrow",Arial,Helvetica,sans-serif;
+            font-weight:900; font-style:italic; }
+    </style>
+  </defs>
+  <!-- soft drop shadow under the lower banner -->
+  <polygon points="196,300 712,336 700,486 196,542" fill="#000" opacity="0.12"
+           transform="translate(6,10)"/>
+  <!-- top banner (red skewed ribbon) -->
+  <polygon points="6,44 548,6 560,300 6,338" fill="#E11F26"/>
+  <!-- bottom banner (red skewed ribbon, offset right) -->
+  <polygon points="188,300 714,336 702,486 188,540" fill="#E11F26"/>
+  <!-- wordmark -->
+  <text class="wm" x="52" y="252" font-size="228" transform="rotate(-3.5 52 252)">Mag</text>
+  <text class="wm" x="250" y="486" font-size="228" transform="rotate(-2.5 250 486)">Dyn</text>
+</svg>

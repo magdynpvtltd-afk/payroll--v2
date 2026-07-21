@@ -329,23 +329,49 @@ if ($action === 'view') {
                 <thead>
                     <tr>
                         <th>#</th>
+                        <th>Dir</th>
                         <th>Type</th>
                         <th>Code / Tag</th>
                         <th>Description</th>
                         <th class="r">Qty</th>
+                        <th>UOM</th>
+                        <th class="r">Unit Price</th>
+                        <th class="r">GST %</th>
+                        <th class="r">Total</th>
                         <th>Before</th>
                         <th>Delivery</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if (!$lines): ?>
-                        <tr><td colspan="7" class="empty muted">No lines.</td></tr>
-                    <?php else: foreach ($lines as $idx => $l):
+                        <tr><td colspan="12" class="empty muted">No lines.</td></tr>
+                    <?php else:
+                        $viewTotal = 0.0;
+                        foreach ($lines as $idx => $l):
                         $isAsset   = $l['entity_type'] === 'asset';
                         $isPending = !$isAsset && empty($l['item_id']) && !empty($l['pending_name']);
+                        // Only receive lines are purchased, so only they carry a
+                        // price. Ship lines are material issued to the vendor and
+                        // show a dash rather than a misleading 0.00.
+                        $isShip = (($l['line_kind'] ?? 'receive') === 'ship');
+                        $price  = (!$isShip && $l['unit_price'] !== null && $l['unit_price'] !== '')
+                                ? (float)$l['unit_price'] : null;
+                        $gst    = (!$isShip && $l['gst_rate'] !== null && $l['gst_rate'] !== '')
+                                ? (float)$l['gst_rate'] : null;
+                        $qtyVal = (float)($l['qty_planned'] ?? 0);
+                        $lineTotal = $price !== null ? $price * $qtyVal : null;
+                        if ($lineTotal !== null && $gst !== null) $lineTotal += $lineTotal * ($gst / 100);
+                        if ($lineTotal !== null) $viewTotal += $lineTotal;
                     ?>
                         <tr>
                             <td><?= $idx + 1 ?></td>
+                            <td>
+                                <?php if ($isShip): ?>
+                                    <span class="pill pill-warn" title="Material issued to the vendor">↑ Ship</span>
+                                <?php else: ?>
+                                    <span class="pill pill-info" title="Material purchased from the vendor">↓ Receive</span>
+                                <?php endif; ?>
+                            </td>
                             <td>
                                 <?php if ($isAsset): ?>
                                     <span class="pill pill-info">A-Asset</span>
@@ -358,10 +384,20 @@ if ($action === 'view') {
                             <td><code><?= h($isAsset ? ($l['asset_tag'] ?: '—') : ($l['item_code'] ?: '(new)')) ?></code></td>
                             <td><?= h($isAsset ? ($l['asset_model'] ?? '') : ($l['item_name'] ?: ($l['pending_name'] ?? ''))) ?></td>
                             <td class="r"><?= h(rtrim(rtrim((string)$l['qty_planned'], '0'), '.')) ?></td>
-                            <td><?= h($l['before_date'] ?? '—') ?></td>
-                            <td><?= h($l['delivery_date'] ?? '—') ?></td>
+                            <td><?= h($l['uom_label'] ?? '') ?: '—' ?></td>
+                            <td class="r"><?= $price !== null ? h(number_format($price, 2)) : '—' ?></td>
+                            <td class="r"><?= $gst   !== null ? h(rtrim(rtrim(number_format($gst, 2, '.', ''), '0'), '.')) : '—' ?></td>
+                            <td class="r"><?= $lineTotal !== null ? h(number_format($lineTotal, 2)) : '—' ?></td>
+                            <td><?= h($l['before_date'] ?? '') ?: '—' ?></td>
+                            <td><?= h($l['delivery_date'] ?? '') ?: '—' ?></td>
                         </tr>
-                    <?php endforeach; endif; ?>
+                    <?php endforeach; ?>
+                        <tr>
+                            <td colspan="9" class="r"><strong>Total</strong></td>
+                            <td class="r"><strong><?= h(number_format($viewTotal, 2)) ?></strong></td>
+                            <td colspan="2"></td>
+                        </tr>
+                    <?php endif; ?>
                 </tbody>
             </table>
         </div>

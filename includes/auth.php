@@ -65,14 +65,29 @@ function current_user_id()
     return real_user_id();
 }
 
-function current_user()
-{
-    static $cache = null;
-    if ($cache !== null) return $cache ?: null;
-    $id = current_user_id();
-    if (!$id) { $cache = false; return null; }
-    $cache = db_one('SELECT * FROM users WHERE id = ? LIMIT 1', [$id]);
-    return $cache ?: null;
+/**
+ * Effective user row.
+ *
+ * Guarded so TaskFlow (/taskflow/) can borrow MagDyn's chrome — see
+ * taskflow/magdyn_chrome.php. TaskFlow declares its own current_user() first
+ * and it stays in force there; it returns the same users row plus the extra
+ * keys its templates read ('role', 'name', 'status'), so header.php's uses
+ * (full_name / username / email / id) are all still satisfied.
+ *
+ * One deliberate divergence: TaskFlow's version keys off $_SESSION['uid'] and
+ * so does NOT follow impersonation. A TaskFlow page therefore always acts as
+ * the real signed-in user, which is what its task-permission rules assume.
+ */
+if (!function_exists('current_user')) {
+    function current_user()
+    {
+        static $cache = null;
+        if ($cache !== null) return $cache ?: null;
+        $id = current_user_id();
+        if (!$id) { $cache = false; return null; }
+        $cache = db_one('SELECT * FROM users WHERE id = ? LIMIT 1', [$id]);
+        return $cache ?: null;
+    }
 }
 
 function is_impersonating()
@@ -80,12 +95,22 @@ function is_impersonating()
     return !empty($_SESSION['impersonate_uid']) && real_user_id() !== (int)$_SESSION['impersonate_uid'];
 }
 
-/** Require a signed-in user; bounce to login otherwise. */
-function require_login()
-{
-    if (!real_user_id()) {
-        $_SESSION['_return_to'] = $_SERVER['REQUEST_URI'] ?? '';
-        redirect(url('/login.php'));
+/**
+ * Require a signed-in user; bounce to login otherwise.
+ *
+ * Guarded for TaskFlow (see current_user() above). TaskFlow's version stays in
+ * force on its own pages, where it must: it bounces to TaskFlow's login rather
+ * than MagDyn's, additionally enforces the taskflow.view grant, and RETURNS the
+ * user row — its callers do `$me = require_login();`, which ours (void) would
+ * leave null.
+ */
+if (!function_exists('require_login')) {
+    function require_login()
+    {
+        if (!real_user_id()) {
+            $_SESSION['_return_to'] = $_SERVER['REQUEST_URI'] ?? '';
+            redirect(url('/login.php'));
+        }
     }
 }
 

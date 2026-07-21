@@ -40,12 +40,21 @@ date_default_timezone_set($APP['timezone']);
 require_once __DIR__ . '/db.php';
 
 // ---- Session ----
-session_name($APP['session_name']);
-ini_set('session.cookie_httponly', '1');
-ini_set('session.use_strict_mode', '1');
-ini_set('session.cookie_samesite', 'Lax');
-ini_set('session.gc_maxlifetime', (string)$APP['session_lifetime']);
-session_start();
+// Skipped when a session is already running: TaskFlow (/taskflow/) starts the
+// shared session itself and then pulls this file in for MagDyn's page chrome
+// (see taskflow/magdyn_chrome.php). Re-entering here would warn on every
+// ini_set/session_name and re-start an active session. It is the SAME session
+// either way — TaskFlow reads session_name from this same app.config.php — so
+// there is nothing to redo. On a normal MagDyn request no session exists yet
+// and the block runs exactly as before.
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_name($APP['session_name']);
+    ini_set('session.cookie_httponly', '1');
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.cookie_samesite', 'Lax');
+    ini_set('session.gc_maxlifetime', (string)$APP['session_lifetime']);
+    session_start();
+}
 
 // ---- Core helpers ----
 require_once __DIR__ . '/helpers.php';

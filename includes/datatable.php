@@ -417,6 +417,32 @@ function data_table_render(array $cfg, array $dt, callable $rowRenderer)
                     </select>
                     / page
                 </label>
+                <?php
+                    // Mobile-only "Sort by" control. On phones the table
+                    // scrolls horizontally, so tapping a column header to sort
+                    // is awkward. This dropdown (shown only ≤720px via CSS)
+                    // drives the exact same sort as the headers and lists every
+                    // sortable column. datatable.js binds it (.dt-sort-select /
+                    // .dt-sort-dir) to the existing reload flow.
+                    $sortableCols = [];
+                    foreach ($cols as $c) { if (!empty($c['sortable'])) $sortableCols[] = $c; }
+                    if ($sortableCols):
+                        $curDir = ($dt['dir'] === 'desc') ? 'desc' : 'asc';
+                ?>
+                    <label class="dt-mobile-sort muted small">
+                        <span class="dt-mobile-sort-lbl">Sort</span>
+                        <select class="dt-sort-select no-combobox" aria-label="Sort by column">
+                            <option value="">—</option>
+                            <?php foreach ($sortableCols as $c): ?>
+                                <option value="<?= h($c['key']) ?>" <?= $dt['sort'] === $c['key'] ? 'selected' : '' ?>><?= h($c['label']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <button type="button" class="btn btn-sm btn-ghost dt-sort-dir"
+                                data-dir="<?= h($curDir) ?>"
+                                title="Toggle sort direction (ascending / descending)"
+                                aria-label="Toggle sort direction"><?= $curDir === 'asc' ? '▲' : '▼' ?></button>
+                    </label>
+                <?php endif; ?>
                 <?php if ($actions): ?>
                     <span class="dt-toolbar-actions"><?= $actions ?></span>
                 <?php endif; ?>
@@ -597,6 +623,27 @@ function data_table_render(array $cfg, array $dt, callable $rowRenderer)
                                            data-dt-col-idx="<?= (int)$idx ?>"
                                            value="<?= h($cliCur) ?>"
                                            placeholder="<?= h($c['label']) ?>">
+                                </div>
+                            <?php endif; ?>
+                            <?php
+                            // The LAST column's filter cell also carries the
+                            // table-wide "search all" box. The backend already
+                            // supports a global query (dt_q) across every
+                            // searchable column, and datatable.js auto-binds any
+                            // .dt-q input — so no extra JS/PHP plumbing is
+                            // needed. On the usual list page the last column is
+                            // _actions (no per-column filter of its own), so
+                            // this fills that otherwise-empty cell with a
+                            // genuinely useful control.
+                            if ($idx === $colCount - 1):
+                            ?>
+                                <div class="dt-filter-pill dt-globalsearch-pill">
+                                    <span class="dt-filter-icon" aria-hidden="true">🔍</span>
+                                    <input type="search" class="dt-q"
+                                           value="<?= h($dt['q'] ?? '') ?>"
+                                           placeholder="Search all"
+                                           aria-label="Search across every column"
+                                           title="Search across every column in this table">
                                 </div>
                             <?php endif; ?>
                         </td>

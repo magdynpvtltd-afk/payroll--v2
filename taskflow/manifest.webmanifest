@@ -1,0 +1,30 @@
+{
+  "name": "TaskFlow",
+  "short_name": "TaskFlow",
+  "description": "Assign tasks, comment, and share attachments with your team.",
+  "start_url": "index.php",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#E11F26",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ],
+  "share_target": {
+    "action": "share_target.php",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": ["image/*", "audio/*", "video/*", "application/pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt", ".zip"]
+        }
+      ]
+    }
+  }
+}

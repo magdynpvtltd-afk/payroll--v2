@@ -2103,6 +2103,12 @@ if ($action === 'save') {
                 rtrim(rtrim(number_format($releaseInfo['qty'], 3), '0'), '.'),
                 $dstLabel);
         }
+        // Surface any cap-release shortfall to the approver immediately —
+        // the full detail is also recorded on the inspection's notes.
+        if (!empty($releaseInfo['shortfall']) && $releaseInfo['shortfall'] > 0.0001) {
+            $msg .= sprintf(' Note: %s short in QC-Hold (already consumed/shipped before approval) — variance recorded on the inspection.',
+                rtrim(rtrim(number_format($releaseInfo['shortfall'], 3), '0'), '.'));
+        }
         flash_set('success', $msg);
         redirect(url('/inspection.php?action=view&id=' . $id));
     }

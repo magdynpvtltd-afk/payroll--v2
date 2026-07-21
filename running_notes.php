@@ -205,7 +205,7 @@ if (notes_handle_action()) {
         $et  = (string)input('entity_type', '');
         $eid = (int)input('entity_id', 0);
         $rt  = (string)input('return_to', '');
-        if (in_array($et, ['asset','asset_txn','inv_item','inv_txn','inspection','inspection_template','shiprcpt','shr_line'], true) && $eid > 0) {
+        if (in_array($et, ['asset','asset_txn','inv_item','inv_txn','inspection','inspection_template','shiprcpt','shr_line','shr_txn'], true) && $eid > 0) {
             notes_render($et, $eid, 'modal', $rt);
         }
         exit;
@@ -674,7 +674,7 @@ if ($action === 'modal') {
     $et = (string)input('entity_type', '');
     $id = (int)input('entity_id', 0);
     $rt = (string)input('return_to', '');
-    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template', 'shiprcpt', 'shr_line'], true) || $id <= 0) {
+    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template', 'shiprcpt', 'shr_line', 'shr_txn'], true) || $id <= 0) {
         http_response_code(400);
         echo '<p style="color:#b91c1c;">Bad request.</p>';
         exit;
@@ -694,7 +694,7 @@ if ($action === 'attachments') {
     header('Content-Type: application/json; charset=utf-8');
     $et = (string)input('entity_type', '');
     $id = (int)input('entity_id', 0);
-    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template', 'shiprcpt', 'shr_line'], true) || $id <= 0) {
+    if (!in_array($et, ['asset', 'asset_txn', 'inv_item', 'inv_txn', 'inspection', 'inspection_template', 'shiprcpt', 'shr_line', 'shr_txn'], true) || $id <= 0) {
         echo '[]';
         exit;
     }
@@ -1230,7 +1230,9 @@ $dtCfg = [
            LEFT JOIN inspections ein    ON n.entity_type = 'inspection' AND ein.id    = n.entity_id
            LEFT JOIN inv_shipment_lines esl ON n.entity_type = 'shr_line' AND esl.id    = n.entity_id
            LEFT JOIN inv_items  esl_i   ON n.entity_type = 'shr_line'   AND esl_i.id   = esl.item_id
-           LEFT JOIN inv_shipments esl_sh ON n.entity_type = 'shr_line' AND esl_sh.id  = esl.shipment_id",
+           LEFT JOIN inv_shipments esl_sh ON n.entity_type = 'shr_line' AND esl_sh.id  = esl.shipment_id
+           LEFT JOIN inv_txns   etx     ON n.entity_type = 'shr_txn'    AND etx.id     = n.entity_id
+           LEFT JOIN inv_items  etx_i   ON n.entity_type = 'shr_txn'    AND etx_i.id   = etx.item_id",
     'extra_where' => [
         ['n.is_deleted = 0', []],
         [$catWhere, []],
@@ -1248,6 +1250,7 @@ $dtCfg = [
                 WHEN n.entity_type = 'inv_txn'    THEN eit_i.code
                 WHEN n.entity_type = 'inspection' THEN ein.code
                 WHEN n.entity_type = 'shr_line'   THEN esl_i.code
+                WHEN n.entity_type = 'shr_txn'    THEN etx_i.code
             END"],
         ['key'=>'entity',         'label'=>'Entity',     'sortable'=>false, 'searchable'=>true,
             'sql_col'=>"CASE
@@ -1257,6 +1260,7 @@ $dtCfg = [
                 WHEN n.entity_type = 'inv_txn'    THEN CONCAT(eit_i.code, ' ', eit.txn_type)
                 WHEN n.entity_type = 'inspection' THEN ein.code
                 WHEN n.entity_type = 'shr_line'   THEN CONCAT(esl_i.code, ' · ', esl_sh.ship_no)
+                WHEN n.entity_type = 'shr_txn'    THEN CONCAT(etx_i.code, ' · txn #', etx.id)
             END"],
         ['key'=>'entity_desc',    'label'=>'Description', 'sortable'=>false, 'searchable'=>true,
             'sql_col'=>"CONCAT_WS(' ',
@@ -1266,9 +1270,10 @@ $dtCfg = [
                     WHEN n.entity_type = 'inv_item'  THEN ei.short_description
                     WHEN n.entity_type = 'inv_txn'   THEN eit_i.short_description
                     WHEN n.entity_type = 'shr_line'  THEN esl_i.short_description
+                    WHEN n.entity_type = 'shr_txn'   THEN etx_i.short_description
                 END,
-                CASE WHEN n.entity_type = 'inv_item' THEN ei.part_no    WHEN n.entity_type = 'inv_txn' THEN eit_i.part_no    END,
-                CASE WHEN n.entity_type = 'inv_item' THEN ei.part_rev_no WHEN n.entity_type = 'inv_txn' THEN eit_i.part_rev_no END
+                CASE WHEN n.entity_type = 'inv_item' THEN ei.part_no    WHEN n.entity_type = 'inv_txn' THEN eit_i.part_no    WHEN n.entity_type = 'shr_txn' THEN etx_i.part_no    END,
+                CASE WHEN n.entity_type = 'inv_item' THEN ei.part_rev_no WHEN n.entity_type = 'inv_txn' THEN eit_i.part_rev_no WHEN n.entity_type = 'shr_txn' THEN etx_i.part_rev_no END
             )"],
         ['key'=>'note_type_name', 'label'=>'Category',   'sortable'=>true, 'sql_col'=>'c.name'],
         ['key'=>'body',           'label'=>'Note',       'sortable'=>false, 'sql_col'=>'n.body_html'],
@@ -1348,6 +1353,31 @@ $rowRenderer = function ($r) use ($attsByNote) {
             $entLabel = ($sline['item_code'] ?: ('line #' . (int)$sline['id']))
                       . ($sline['ship_no'] ? ' · ' . $sline['ship_no'] : '');
             $entLink  = url('/inventory_shiprcpt.php?action=view&id=' . (int)$sline['shipment_id']);
+        }
+    } elseif ($r['entity_type'] === 'shr_txn') {
+        // Per-receipt shipment note — entity_id = inv_txns.id. Label with the
+        // item code + internal txn #; link to the parent shipment resolved via
+        // the receipt row (inv_receipts.txn_id) so the note lands where it was
+        // added on the Ship & Receipt list.
+        $stx = db_one(
+            'SELECT t.id, i.code AS item_code,
+                    r.shipment_id, sh.ship_no
+               FROM inv_txns t
+               LEFT JOIN inv_items    i  ON i.id  = t.item_id
+               LEFT JOIN inv_receipts r  ON r.txn_id = t.id
+               LEFT JOIN inv_shipments sh ON sh.id = r.shipment_id
+              WHERE t.id = ?
+              ORDER BY r.id
+              LIMIT 1',
+            [$r['entity_id']]
+        );
+        if ($stx) {
+            $entLabel = ($stx['item_code'] ?: ('txn #' . (int)$stx['id']))
+                      . ($stx['ship_no'] ? ' · ' . $stx['ship_no'] : '')
+                      . ' · #' . (int)$stx['id'];
+            $entLink  = !empty($stx['shipment_id'])
+                      ? url('/inventory_shiprcpt.php?action=view&id=' . (int)$stx['shipment_id'])
+                      : '#';
         }
     } elseif ($r['entity_type'] === 'inspection') {
         $ins = db_one('SELECT id, code FROM inspections WHERE id = ?', [$r['entity_id']]);

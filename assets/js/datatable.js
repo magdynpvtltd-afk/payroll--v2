@@ -198,6 +198,18 @@
                     }
                 });
 
+                // Keep the mobile "Sort by" control in sync with the sort the
+                // server actually applied (e.g. after a desktop header click on
+                // a rotated tablet, or a restored view).
+                var msSel = wrap.querySelector('.dt-sort-select');
+                var msDir = wrap.querySelector('.dt-sort-dir');
+                if (msSel) msSel.value = data.sort || '';
+                if (msDir) {
+                    var dd = data.dir === 'desc' ? 'desc' : 'asc';
+                    msDir.setAttribute('data-dir', dd);
+                    msDir.textContent = dd === 'desc' ? '▼' : '▲';
+                }
+
                 if (pushHistory) {
                     history.pushState({ dt: true }, '', url.toString());
                 }
@@ -332,6 +344,36 @@
                 if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fire(); }
             });
         });
+
+        // ---- Mobile "Sort by" control ----
+        // Mirrors header-click sorting for small screens. The <select> holds
+        // the column key; the adjacent button toggles asc/desc. Both drive the
+        // same reload() path as the sortable headers.
+        var sortSel    = wrap.querySelector('.dt-sort-select');
+        var sortDirBtn = wrap.querySelector('.dt-sort-dir');
+        function fireMobileSort() {
+            var s = readState(wrap);
+            if (sortSel)    s.sort = sortSel.value;
+            if (sortDirBtn) s.dir  = sortDirBtn.getAttribute('data-dir') || 'asc';
+            s.page = 1;
+            reload(wrap, s, true);
+            debouncedSave();
+        }
+        if (sortSel) {
+            sortSel.addEventListener('change', function () {
+                if (!sortSel.value) return;   // "—" placeholder: keep current sort
+                fireMobileSort();
+            });
+        }
+        if (sortDirBtn) {
+            sortDirBtn.addEventListener('click', function () {
+                var d = sortDirBtn.getAttribute('data-dir') === 'asc' ? 'desc' : 'asc';
+                sortDirBtn.setAttribute('data-dir', d);
+                sortDirBtn.textContent = d === 'desc' ? '▼' : '▲';
+                // Only reload if a column is actually selected to sort by.
+                if (sortSel && sortSel.value) fireMobileSort();
+            });
+        }
 
         // ---- Paginator (event delegation since contents are replaced) ----
         wrap.addEventListener('click', function (e) {

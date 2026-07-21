@@ -1,0 +1,586 @@
+/* TaskFlow — mobile-first, responsive. WhatsApp-inspired green accent. */
+:root{
+  /* Brand palette derived from the Mag Dyn logo (red). Variable names kept
+     from the original theme so the rest of the CSS needs no renaming. */
+  --green:#E11F26; --green-d:#B71A1F; --bg:#f4f5f7; --card:#fff;
+  --ink:#1f2a30; --muted:#6b7a80; --line:#e3e8ea; --red:#c0392b;
+  --hi:#FDECEC; --shadow:0 1px 3px rgba(0,0,0,.08);
+  --radius:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg); color:var(--ink); line-height:1.45;
+  -webkit-text-size-adjust:100%;
+}
+a{color:var(--green-d);text-decoration:none}
+h1{font-size:1.35rem;margin:.2rem 0 .6rem}
+h2{font-size:1.05rem;margin:.2rem 0 .6rem}
+
+/* ---- top bar ----
+   (desktop.php renders no topbar — it carries the same nav inside the
+   datatable toolbar instead; see $hideTopbar in header.php.)
+   `.brand{margin-right:auto}` rather than `justify-content:space-between`:
+   space-between would spread .topnav, .usernav and the bell evenly across the
+   bar. This pins the brand left and lets everything else cluster right, which
+   also survives .topnav disappearing on phones. */
+.topbar{
+  position:sticky;top:0;z-index:20;background:#fff;color:var(--ink);
+  display:flex;align-items:center;gap:.6rem;
+  padding:.55rem 1rem;padding-top:calc(.55rem + env(safe-area-inset-top));
+  box-shadow:var(--shadow);border-bottom:2px solid var(--green);
+}
+.brand{display:inline-flex;align-items:center;gap:.5rem;margin-right:auto;
+  color:var(--green);font-weight:800;font-size:1.1rem}
+.brand img{height:34px;width:auto;display:block}
+.topnav{display:none;gap:1.1rem;align-items:center}
+.topnav a{color:var(--ink)}
+.topnav a:hover{color:var(--green)}
+
+/* ---- user nav: inventory link + profile menu (nav.php) ----
+   Rendered in the topbar on the card pages and in the datatable toolbar on
+   desktop.php, so it brings its own styling and inherits from neither. */
+.usernav{display:inline-flex;align-items:center;gap:.35rem;min-width:0}
+.usernav-link,.usermenu>summary{
+  display:inline-flex;align-items:center;gap:.3rem;
+  padding:.3rem .55rem;border-radius:999px;
+  color:var(--ink);font-size:.85rem;font-weight:600;
+  white-space:nowrap;cursor:pointer;
+}
+.usernav-link:hover,.usermenu>summary:hover{background:var(--hi);color:var(--green-d)}
+.usernav-lbl{overflow:hidden;text-overflow:ellipsis;max-width:9rem}
+
+/* <details> draws a disclosure triangle by default; the caret span replaces it.
+   Chrome/Safari need the ::-webkit- pseudo, Firefox honours list-style. */
+.usermenu{position:relative}
+.usermenu>summary{list-style:none}
+.usermenu>summary::-webkit-details-marker{display:none}
+.usermenu>summary::marker{content:''}
+.usermenu[open]>summary{background:var(--hi);color:var(--green-d)}
+.usermenu-caret{font-size:.7rem;opacity:.6}
+.usermenu-pop{
+  position:absolute;top:calc(100% + .4rem);right:0;z-index:40;
+  display:flex;flex-direction:column;min-width:11rem;padding:.3rem;
+  background:#fff;border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 6px 20px rgba(0,0,0,.16);
+}
+.usermenu-mail{
+  padding:.35rem .55rem;margin-bottom:.2rem;border-bottom:1px solid var(--line);
+  font-size:.75rem;color:var(--muted);
+  max-width:14rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.usermenu-logout{display:block;margin:0}
+.usermenu-pop a,.usermenu-logout button{
+  display:block;width:100%;text-align:left;
+  padding:.45rem .55rem;border:0;border-radius:6px;background:none;
+  color:var(--ink);font:inherit;font-size:.85rem;font-weight:600;
+  white-space:nowrap;cursor:pointer;
+}
+.usermenu-pop a:hover,.usermenu-logout button:hover{background:var(--hi);color:var(--green-d)}
+/* Narrow phones: the topbar is brand + this cluster + the bell, which is more
+   than fits. Drop to icons — both controls carry a title= saying what they are. */
+@media(max-width:560px){.usernav-lbl{display:none}}
+
+/* Phones get no link back to MagDyn. Below 720px TaskFlow is the card view, which
+   is also what the installed PWA runs: there is no MagDyn shell around it to go
+   "back" to, and the label is already suppressed above, so the link had degraded
+   to a bare ↩ that only crowded the bar. Reach TaskFlow from MagDyn's own sidebar
+   (it is a top-level module) — this is one-way on phones by design.
+   719.98px, not 720px: desktop.php renders this same cluster in its toolbar and
+   its breakpoint is min-width:720px, so a plain max-width:720px would hide the
+   link on the table view at exactly 720px wide. */
+@media(max-width:719.98px){.usernav-link{display:none}}
+
+/* ---- layout ---- */
+.wrap{max-width:760px;margin:0 auto;padding:1rem 1rem 6rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:1rem;margin:.7rem 0;box-shadow:var(--shadow)}
+.muted{color:var(--muted)}
+.small{font-size:.82rem}
+.flash{background:var(--hi);border:1px solid #bfe3db;color:#0c5f55;
+  padding:.6rem .8rem;border-radius:10px;margin:.6rem 0}
+.err{color:var(--red);margin:.3rem 0}
+.ok{color:var(--green-d);margin:.3rem 0}
+pre{white-space:pre-wrap;background:#f6f8f8;padding:.6rem;border-radius:8px;overflow:auto}
+
+/* ---- buttons ---- */
+.btn{display:inline-block;background:#eef1f2;color:var(--ink);border:1px solid var(--line);
+  border-radius:999px;padding:.55rem 1rem;font-size:.92rem;cursor:pointer;font-weight:600}
+.btn:hover{filter:brightness(.98)}
+.btn.primary{background:var(--green);color:#fff;border-color:var(--green)}
+.btn.small{padding:.35rem .7rem;font-size:.82rem}
+.btn.danger{background:#fff;color:var(--red);border-color:#f0c3c1}
+.btn.wa-btn{background:#25D366;color:#083b21;border-color:#25D366}
+.st-done{background:var(--green);color:#fff;border-color:var(--green)}
+.linkbtn{background:none;border:0;color:var(--red);cursor:pointer;font-size:.8rem;padding:0}
+.inline{display:inline}
+
+/* ---- forms ---- */
+label{display:block;margin:.55rem 0;font-size:.9rem;font-weight:600}
+input,select,textarea{
+  width:100%;padding:.65rem .7rem;margin-top:.25rem;border:1px solid var(--line);
+  border-radius:10px;font-size:1rem;font-family:inherit;background:#fff;font-weight:400
+}
+input[type=checkbox],input[type=radio]{width:auto;margin:0 .4rem 0 0}
+textarea{resize:vertical}
+.stack>*{margin-top:.5rem}
+.two{display:flex;gap:.7rem}.two>label{flex:1}
+.formbtns{display:flex;gap:.6rem;margin-top:.9rem}
+fieldset{border:1px solid var(--line);border-radius:10px;padding:.7rem;margin:.4rem 0}
+.auth{max-width:420px;margin:2rem auto}
+.auth-logo{display:block;width:170px;max-width:60%;height:auto;margin:.2rem auto 1.1rem}
+
+/* ---- filters / pills ---- */
+.filters{display:flex;gap:.4rem;flex-wrap:wrap;margin:.4rem 0}
+.pill{background:#fff;border:1px solid var(--line);border-radius:999px;
+  padding:.35rem .8rem;font-size:.82rem;color:var(--muted)}
+.pill.on{background:var(--green);color:#fff;border-color:var(--green)}
+.listhead{display:flex;align-items:center;justify-content:space-between}
+.listhead .btn{white-space:nowrap}
+
+/* ---- task list ---- */
+.tasklist{display:flex;flex-direction:column;gap:.6rem;margin-top:.6rem}
+.task{display:block;color:inherit}
+.task:hover{border-color:#cdd6d8}
+.task-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:.35rem}
+.task-title{font-weight:700}
+.task-title.done,h1.done{text-decoration:line-through;color:var(--muted)}
+.task.s-done{opacity:.75}
+.prio{font-size:.68rem;text-transform:uppercase;letter-spacing:.03em;font-weight:700;
+  padding:.15rem .5rem;border-radius:999px}
+.p-high{background:#fdeaea;color:#b02a25}
+.p-medium{background:#fef3e2;color:#a6641b}
+.p-low{background:#eef6ee;color:#3a7d3a}
+.stat{font-size:.72rem;color:var(--muted);font-weight:600}
+.s-in_progress{border-left:4px solid var(--green)}
+.task-top-right{display:inline-flex;align-items:center;gap:.45rem}
+
+/* unread-comment count balloon (mobile card + desktop table) */
+.unread-badge{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:1.25rem;height:1.25rem;padding:0 .35rem;border-radius:999px;
+  background:var(--green);color:#fff;font-size:.72rem;font-weight:700;line-height:1;
+  box-shadow:0 1px 2px rgba(0,0,0,.2)
+}
+
+/* last-comment one-liner under a task card */
+.last-comment{margin-top:.35rem;color:var(--muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---- task detail ---- */
+.back{display:inline-block;margin:.2rem 0 .4rem;color:var(--muted)}
+.desc{white-space:normal;margin:.4rem 0}
+.meta{margin:.4rem 0}
+.share-row{margin:.6rem 0}
+.statusbar{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.7rem;
+  border-top:1px solid var(--line);padding-top:.7rem}
+
+/* ---- comments ---- */
+.timeline{display:flex;flex-direction:column;gap:.7rem;margin:.5rem 0}
+.comment{background:#f8fafa;border:1px solid var(--line);border-radius:10px;padding:.6rem .7rem}
+.c-head{display:flex;gap:.5rem;align-items:baseline;justify-content:space-between}
+.c-body{margin:.3rem 0}
+.commentform{border-top:1px solid var(--line);margin-top:.8rem;padding-top:.8rem}
+.wa-source{font-weight:400;font-size:.85rem}
+.wa-hint{margin-top:.5rem}
+
+/* ---- attachments ---- */
+.attgrid{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:.5rem}
+.att{width:calc(50% - .3rem);border:1px solid var(--line);border-radius:10px;padding:.4rem;background:#fff}
+.thumb{width:100%;height:120px;object-fit:cover;border-radius:8px;display:block}
+.filelink{display:block;padding:.5rem 0;font-weight:600;word-break:break-word}
+.att-meta{margin-top:.25rem}
+.att-actions{display:flex;gap:.6rem;align-items:center;margin-top:.35rem}
+.att-actions .wa{color:#128C7E;font-weight:600;font-size:.8rem}
+
+/* ---- users admin ---- */
+.userlist{display:flex;flex-direction:column;gap:.6rem}
+.user .urow{display:flex;justify-content:space-between;align-items:flex-start}
+.badge{display:inline-block;font-size:.66rem;text-transform:uppercase;letter-spacing:.03em;
+  padding:.1rem .45rem;border-radius:999px;margin-left:.3rem;font-weight:700;background:#eef1f2;color:var(--muted)}
+.b-admin{background:var(--hi);color:var(--green-d)}
+.b-on{background:#eef6ee;color:#3a7d3a}.b-off{background:#fdeaea;color:#b02a25}
+.b-unassigned{background:#fff4e0;color:#a8690a;margin-left:0}
+.assign-form{display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap;margin-top:.7rem}
+.assign-form label{margin:0}.assign-form select{min-width:12rem}
+.user .actions{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem;align-items:center}
+.user .actions form{display:flex;gap:.3rem;align-items:center}
+.user .resetpw input{width:110px;padding:.35rem .5rem;margin:0}
+
+.empty{text-align:center;padding:2rem 1rem}
+
+/* ---- enable-notifications bell (nav.php) ----
+   Collapsed to just the bell so it fits inline at the top right of a header
+   row; hover or keyboard focus slides the label out. It used to be a fixed
+   pill anchored to the bottom of the viewport, which meant it sat on top of
+   whatever was underneath — the desktop table worst of all. Living in the
+   header row, it has nothing to overlap. */
+.push-cta{
+  display:inline-flex;align-items:center;flex-shrink:0;
+  padding:.32rem .45rem;border:0;border-radius:999px;
+  background:var(--green);color:#fff;
+  font-family:inherit;font-size:.9rem;font-weight:600;line-height:1;
+  cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.18);
+}
+/* Now that .push-cta sets `display`, it out-specifies the UA's `[hidden]`
+   rule (any author declaration beats the user-agent sheet), so the bell would
+   show on every page — subscribed or not — without this. Same trap the
+   .tfdt-wrap .btn[hidden] rule below documents. */
+.push-cta[hidden]{display:none}
+.push-cta[disabled]{opacity:.6}
+.push-ico{line-height:1}
+/* max-width, not width/display: it animates, and 0 keeps the label out of the
+   button's measured width so the collapsed bell is a clean circle. */
+.push-lbl{
+  max-width:0;margin-left:0;overflow:hidden;white-space:nowrap;font-size:.8rem;
+  transition:max-width .18s ease,margin-left .18s ease;
+}
+.push-cta:hover .push-lbl,
+.push-cta:focus-visible .push-lbl,
+.push-cta.push-open .push-lbl{max-width:14rem;margin-left:.35rem}
+@media(prefers-reduced-motion:reduce){.push-lbl{transition:none}}
+
+/* ---- bottom tab bar (mobile) ---- */
+.tabbar{position:fixed;left:0;right:0;bottom:0;z-index:20;display:flex;background:#fff;
+  border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+.tabbar a{flex:1;text-align:center;padding:.5rem 0;color:var(--muted);font-size:1.3rem}
+.tabbar a span{display:block;font-size:.62rem;margin-top:.1rem}
+
+/* Logout is a CSRF-safe POST form but should look like the nav item it replaced.
+   (The topbar's copy now lives in the profile menu — see .usermenu-logout.) */
+.logout-form{display:contents}
+.tabbar .logout-form button{flex:1;text-align:center;font:inherit;background:none;border:0;cursor:pointer;padding:.5rem 0;color:var(--muted);font-size:1.3rem}
+.tabbar .logout-form button span{display:block;font-size:.62rem;margin-top:.1rem}
+.remember{display:flex;align-items:center;gap:.4rem;font-size:.9rem;color:var(--muted)}
+
+/* ============================================================
+   Data table (desktop.php)
+   Ported to match the MagDyn inventory list-page datatable
+   (includes/datatable.php + assets/css/app.css) so both apps read
+   as one system. Same chrome end-to-end: one toolbar strip
+   (summary · page-size · search · clear · centered title · pager),
+   a sticky uppercase header with sort chevrons, a full grid, and a
+   sticky pill-shaped filter row in the <tfoot>.
+
+   The surface/border/text tokens below mirror magdyn-base.css so the
+   rules can stay near-identical to the originals. They're scoped to
+   .tfdt-wrap (not :root) so they can't leak into TaskFlow's card/mobile
+   styles. --primary/--primary-dark are deliberately NOT set here so they
+   inherit magdyn-base.css's :root navy — the accent every other MagDyn
+   table uses — since this page always loads MagDyn's chrome.
+   ============================================================ */
+.wrap.wide{max-width:1200px}
+
+/* filter + status pills on ONE row (desktop table view) */
+.tfdt-filterbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.5rem 0}
+.tfdt-filterbar .filters{margin:0}
+.filterbar-sep{width:1px;align-self:stretch;min-height:1.6rem;background:var(--line);margin:0 .3rem}
+/* Re-assert the filter pill here at a specificity MagDyn's chrome can't beat.
+   desktop.php now borrows MagDyn's sidebar (magdyn_chrome.php), which loads
+   app.css AFTER this file — and app.css/magdyn-base.css both define a bare
+   `.pill`, a tiny status badge, that would otherwise repaint these interactive
+   filter pills. `.tfdt-filterbar .pill` (0-2-0) outranks it; the rule is a copy
+   of the base `.pill` above so the two stay identical. On TaskFlow's own pages,
+   which don't load MagDyn's CSS, nothing changes. */
+.tfdt-filterbar .pill{
+  display:inline-block;background:#fff;border:1px solid var(--line);
+  border-radius:999px;padding:.35rem .8rem;font-size:.82rem;
+  font-weight:400;letter-spacing:normal;color:var(--muted);line-height:normal;
+}
+/* Active pill uses MagDyn's navy --primary (inherited from :root here, same as
+   the table accents) rather than TaskFlow red, so the whole desktop list view
+   reads in one theme. */
+.tfdt-filterbar .pill.on{background:var(--primary);color:#fff;border-color:var(--primary)}
+
+.tfdt-wrap{
+  --surface:#fff; --surface-alt:#f8f9fb;
+  --border:#e3e5ea; --border-strong:#d0d4dc;
+  --text:#1a1f2e; --text-muted:#6b7280;
+  /* --primary/--primary-dark intentionally NOT declared here: they inherit
+     magdyn-base.css's :root navy (#1e3a8a / #172a63) so this table's accents
+     — sort arrows, focus rings, the primary button, the in-progress row
+     marker — match every other MagDyn table. This page always loads MagDyn's
+     chrome, so the inherited value is always present. */
+  --tfdt-radius:6px;
+  position:relative;display:flex;flex-direction:column;
+  margin-top:.6rem;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--tfdt-radius);
+  overflow:hidden;
+  box-shadow:var(--shadow);
+}
+
+/* ---- toolbar ---- */
+/* A 3-column grid with equal 1fr flanks is what puts the title in the TRUE
+   centre of the bar. (A flex `1 1 auto` title only centres inside whatever gap
+   is left over, so it drifts right; an equal `flex:1 1 0` split instead
+   squeezes the left group until it collides with the title.) The grid keeps
+   the flanks equal AND reserves the space, so a too-wide flank wraps to a
+   second line instead of overlapping. The page actions sit in the right group
+   so the left group comfortably stays inside its half. */
+.tfdt-toolbar{
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px;
+  padding:8px 14px;min-height:44px;flex-shrink:0;
+  background:var(--surface);border-bottom:1px solid var(--border);
+}
+.tfdt-toolbar-left{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap;row-gap:8px}
+.tfdt-toolbar-title{
+  margin:0;font-size:16px;font-weight:600;color:var(--text);text-align:center;
+  min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.tfdt-toolbar-right{
+  display:flex;align-items:center;gap:6px;min-width:0;
+  justify-content:flex-end;flex-wrap:wrap;row-gap:8px;
+}
+.tfdt-summary{white-space:nowrap;color:var(--text-muted);font-size:12px}
+.tfdt-wrap .tfdt-page-size{
+  display:inline-flex;align-items:center;gap:4px;margin:0;
+  font-size:12px;font-weight:400;color:var(--text-muted);white-space:nowrap;
+}
+.tfdt-wrap .tfdt-page-size select{
+  width:auto;margin:0;padding:2px 6px;
+  border:1px solid var(--border);border-radius:3px;
+  background:var(--surface);color:var(--text);
+  font-size:12px;font-family:inherit;font-weight:400;
+}
+/* Global "search all columns" box — same pill as the column filters. This is
+   the only flexible item in the toolbar, so it absorbs any shrink and the
+   buttons beside it keep their natural width on one row. */
+.tfdt-toolbar .tfdt-search-pill{flex:1 1 140px;min-width:110px}
+
+/* Page actions (the bell + New task) stay on ONE row. inline-flex lays them out
+   side by side — without it the span is display:inline and its inline-block
+   button wraps. flex-shrink:0 stops the toolbar squeezing them narrower than
+   their labels. */
+.tfdt-toolbar-actions{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+.tfdt-wrap .tfdt-clear-filters{flex-shrink:0}
+/* [hidden] must out-specify the `.tfdt-wrap .btn{display:inline-block}` rule
+   below (0-2-0 beats the UA's 0-1-0), or a hidden button still renders —
+   which is why Clear-filters showed with no filters active. */
+.tfdt-wrap .btn[hidden]{display:none}
+
+/* Buttons inside the table chrome follow MagDyn's squared button set
+   rather than TaskFlow's rounded pill .btn. white-space:nowrap keeps each
+   label on a single line however tight the toolbar gets. */
+.tfdt-wrap .btn{
+  display:inline-block;padding:8px 16px;
+  border:1px solid var(--border-strong);border-radius:var(--tfdt-radius);
+  background:var(--surface);color:var(--text);
+  font-size:13px;font-weight:500;line-height:1.4;white-space:nowrap;
+  cursor:pointer;text-decoration:none;transition:all .12s ease;
+}
+.tfdt-wrap .btn:hover{background:#f5f6f8;filter:none}
+.tfdt-wrap .btn:disabled,.tfdt-wrap .btn[disabled]{opacity:.5;cursor:not-allowed}
+.tfdt-wrap .btn-primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.tfdt-wrap .btn-primary:hover{background:var(--primary-dark);color:#fff}
+.tfdt-wrap .btn-ghost{background:transparent}
+.tfdt-wrap .btn-ghost:hover{background:var(--surface-alt)}
+.tfdt-wrap .btn-sm{padding:5px 10px;font-size:12px}
+.tfdt-toolbar .btn{padding:5px 12px;font-size:12px;min-height:28px;line-height:1.3}
+
+/* ---- scroll area: capped at 80% of the viewport height ---- */
+.tfdt-scroll{
+  flex:1 1 auto;min-height:0;max-height:80vh;
+  overflow:auto;background:var(--surface);
+}
+
+/* ---- table ---- */
+.tfdt-table{
+  width:100%;margin:0;font-size:13px;table-layout:auto;
+  /* `separate` (not `collapse`) is what keeps position:sticky working
+     on the thead/tfoot cells — same reason as the inventory table. */
+  border-collapse:separate;border-spacing:0;
+}
+.tfdt-table thead th{
+  user-select:none;position:sticky;top:0;z-index:3;
+  background:var(--surface);box-shadow:inset 0 -1px 0 var(--border);
+  text-align:left;vertical-align:middle;white-space:nowrap;
+  padding:7px 2px 7px 12px;
+  font-size:10.5px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);
+}
+.tfdt-table tbody td{
+  padding:7px 12px;font-size:12.5px;vertical-align:middle;
+  border-bottom:1px solid var(--border);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  max-width:0;                 /* lets ellipsis activate inside a table */
+}
+.tfdt-table tbody td > *{vertical-align:middle}
+.tfdt-table tbody tr:hover td{background:#fafbfc}
+.tfdt-table tbody tr:last-child td{border-bottom:1px solid var(--border)}
+/* full grid: vertical rules on every cell, dropped on the last column */
+.tfdt-table thead th,
+.tfdt-table tbody td,
+.tfdt-table tfoot td.tfdt-filter-td{border-right:1px solid var(--border)}
+.tfdt-table thead th:last-child,
+.tfdt-table tbody td:last-child,
+.tfdt-table tfoot td.tfdt-filter-td:last-child{border-right:none}
+
+/* ---- column resize handles ----
+   A thin grab strip on the right edge of every header cell. Widths are saved
+   per column in localStorage (see desktop.php), so a resized layout survives
+   reloads and keeps working offline. Mouse-driven, so the handles are hidden
+   on phones where the columns are too tight to drag anyway. */
+/* NB: deliberately NO `position:relative` on the th here. The header cells are
+   already position:sticky, which is itself a positioned containing block, so
+   the absolutely-positioned grip anchors to them correctly. Adding `relative`
+   would out-specify `.tfdt-table thead th{position:sticky}` (0-2-1 vs 0-1-2) and
+   silently unpin the sticky header — which is why the inventory's app.css has
+   to write `position:sticky !important`. */
+.tfdt-resize-handle{
+  position:absolute;top:0;right:-3px;      /* straddle the cell border */
+  width:6px;height:100%;
+  cursor:col-resize;z-index:4;user-select:none;
+  background:transparent;transition:background .12s;
+}
+/* The last column has no neighbour to straddle into, so its -3px overhang is
+   pure overflow: it pushed scrollWidth 3px past the table and raised a phantom
+   horizontal scrollbar (which then ate ~15px off the bottom of the rows).
+   Tuck it flush — dragging it still grows the table and scrolls for real. */
+.tfdt-table thead th:last-child .tfdt-resize-handle{right:0}
+.tfdt-resize-handle:hover,.tfdt-resize-handle.tfdt-resizing{background:var(--primary);opacity:.4}
+body.tfdt-resizing-active{cursor:col-resize;user-select:none}
+body.tfdt-resizing-active *{cursor:col-resize !important}
+/* An explicit column width only sticks under fixed layout — auto-layout just
+   redistributes it. The JS flips this on and pins the table's total width so
+   growing one column scrolls .tfdt-scroll instead of squeezing its neighbours. */
+.tfdt-table.tfdt-fixed-layout{table-layout:fixed}
+.tfdt-table.tfdt-fixed-layout th,
+.tfdt-table.tfdt-fixed-layout td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tfdt-table.tfdt-fixed-layout tfoot td.tfdt-filter-td{overflow:visible;white-space:normal}
+@media(max-width:720px){.tfdt-resize-handle{display:none}}
+
+/* ---- sortable headers ---- */
+.tfdt-table th.tfdt-sortable{cursor:pointer;white-space:nowrap}
+.tfdt-table th.tfdt-sortable:hover{background:var(--surface-alt)}
+.tfdt-table th.tfdt-sortable:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+.tfdt-th-label{
+  display:inline-block;vertical-align:middle;max-width:calc(100% - 30px);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.tfdt-arrow{margin-left:3px;font-size:10px;opacity:.4;pointer-events:none}
+.tfdt-table th.tfdt-sorted .tfdt-arrow{opacity:1;color:var(--primary)}
+
+/* ---- sticky pill filter row (tfoot) ---- */
+.tfdt-table tfoot.tfdt-filters td.tfdt-filter-td{
+  position:sticky;bottom:0;z-index:2;
+  padding:6px 8px;background:var(--surface);
+  border-top:1px solid var(--border);box-shadow:inset 0 1px 0 var(--border);
+  overflow:visible;white-space:normal;max-width:none;
+}
+.tfdt-filter-pill{
+  display:flex;align-items:center;min-width:0;
+  background:var(--surface-alt);
+  border:1px solid var(--border);border-radius:999px;
+  padding:2px 8px 2px 10px;
+  transition:border-color .12s,background .12s;
+}
+.tfdt-filter-pill:focus-within{border-color:var(--primary);background:var(--surface)}
+.tfdt-filter-icon{font-size:11px;color:var(--text-muted);margin-right:6px;flex-shrink:0}
+.tfdt-wrap .tfdt-filter-pill input,
+.tfdt-wrap .tfdt-filter-pill select{
+  flex:1 1 0;width:100%;min-width:0;margin:0;padding:4px 0;
+  border:none;border-radius:0;background:transparent;outline:none;
+  font-size:12.5px;font-family:inherit;font-weight:400;color:var(--text);
+}
+.tfdt-wrap .tfdt-filter-pill select{cursor:pointer;appearance:none}
+.tfdt-wrap .tfdt-filter-pill input::placeholder{color:var(--text-muted);opacity:.7}
+
+/* ---- pager ---- */
+.tfdt-pager{display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:flex-end;margin:0}
+.tfdt-pager .btn{padding:4px 10px;font-size:12px;min-width:28px}
+.tfdt-ellipsis{color:var(--text-muted);padding:0 2px;font-size:12px}
+
+/* ---- TaskFlow-specific cell treatments ---- */
+.tfdt-row{cursor:pointer}
+.tfdt-row.s-done{opacity:.7}
+.tfdt-row.s-in_progress td:first-child{box-shadow:inset 3px 0 0 var(--primary)}
+.tfdt-title{font-weight:600;color:var(--text)}
+.tfdt-title:hover{color:var(--primary-dark)}
+.tfdt-title.done{text-decoration:line-through;color:var(--text-muted)}
+.tfdt-table .prio{display:inline-block}
+.tfdt-activity{color:var(--text-muted)}
+.tfdt-activity span{margin-right:.35rem}
+.tfdt-empty{text-align:center;color:var(--text-muted);padding:30px;white-space:normal}
+.tfdt-table .muted{color:var(--text-muted)}
+
+/* ---- mobile "Sort by" control (hidden on desktop, where headers sort) ---- */
+.tfdt-mobile-sort{display:none}
+.tfdt-wrap .tfdt-mobile-sort{margin:0;font-size:12px;font-weight:400;color:var(--text-muted)}
+.tfdt-wrap .tfdt-mobile-sort select{
+  width:auto;margin:0;padding:2px 6px;max-width:46vw;
+  border:1px solid var(--border);border-radius:3px;
+  background:var(--surface);color:var(--text);
+  font-size:12px;font-family:inherit;font-weight:400;
+}
+.tfdt-wrap .tfdt-sort-dir{min-width:32px;padding:4px 8px}
+/* The centred title is the first thing to go when the bar gets tight — it only
+   names the page you are already on, and dropping it buys the action buttons
+   the room they need to stay on a single row. The nav beside it stays: that one
+   goes nowhere else on this page. With no title there's nothing to centre, so
+   the bar reverts to flex, which packs tighter than the grid (whose equal 1fr
+   flanks would otherwise strand space on the right). */
+@media(max-width:900px){
+  .tfdt-toolbar{display:flex;flex-wrap:wrap;row-gap:8px}
+  .tfdt-toolbar-title{display:none}
+  .tfdt-toolbar-left{flex:1 1 auto}
+  .tfdt-toolbar-right{flex:0 0 auto;margin-left:auto}
+}
+@media(max-width:720px){
+  .tfdt-mobile-sort{display:inline-flex;align-items:center;gap:6px;order:-1;flex-basis:100%}
+}
+
+/* ---- desktop ---- */
+@media(min-width:720px){
+  .topnav{display:flex}
+  .tabbar{display:none}
+  .wrap{padding-bottom:2rem}
+  .att{width:calc(33.333% - .4rem)}
+}
+
+/* ---- full-height table view ----
+   desktop.php now borrows MagDyn's page chrome (magdyn_chrome.php) and, with
+   it, MagDyn's own viewport lock: it sets $page_body_class = 'has-dt-wrap',
+   the class app.css uses to pin html/body/.layout/.main to one viewport so the
+   page itself never scrolls and only the table body does. That gets the shell
+   for free and keeps this page's height model identical to every MagDyn list.
+
+   app.css's lock targets its own `.dt-wrap`/`.dt-scroll`, though, so it stops
+   at .main. These two rules carry it the last step onto our tfdt- table — the
+   flex child that fills the leftover height, and the scroll area inside it.
+   The filterbar keeps its own margin because .main's padding is zeroed by the
+   lock; borders/radius drop so the grid meets the window edges, exactly as the
+   MagDyn tables do. Phones never see this — desktop.php's <head> guard sends
+   anything under 720px to the card view before paint. */
+body.has-dt-wrap .main > .tfdt-filterbar{margin:.5rem .75rem}
+body.has-dt-wrap .main > .tfdt-wrap{
+  flex:1 1 auto;min-height:0;height:auto;max-height:none;margin-top:0;
+  border-left:0;border-right:0;border-bottom:0;border-radius:0;
+}
+body.has-dt-wrap .tfdt-wrap > .tfdt-scroll{
+  flex:1 1 auto;min-height:0;max-height:none;overflow:auto;
+}
+
+/* ============================================================
+   Attachment preview modal (phone view). Mirrors MagDyn app.css
+   .att-preview-* so clicking a file opens the same overlay the
+   desktop task view gets from MagDyn's chrome. See
+   uploads.php :: tf_attachment_preview_assets().
+   ============================================================ */
+.att-preview-modal[hidden]{display:none}
+.att-preview-modal{position:fixed;inset:0;z-index:10001;display:flex;align-items:stretch;justify-content:stretch}
+.att-preview-backdrop{position:absolute;inset:0;background:rgba(15,23,42,.65)}
+.att-preview-dialog{position:relative;margin:16px;flex:1;background:var(--card,#fff);border-radius:10px;
+  box-shadow:0 20px 50px rgba(0,0,0,.35);display:flex;flex-direction:column;overflow:hidden}
+.att-preview-head{display:flex;align-items:center;gap:10px;padding:.55rem .7rem;
+  border-bottom:1px solid var(--line,#e3e8ea);background:#fff;flex-shrink:0}
+.att-preview-name{flex:1;font-size:.85rem;font-weight:600;color:var(--ink,#1f2a30);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.att-preview-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.att-preview-head .btn{padding:.35rem .6rem;font-size:.78rem}
+.att-preview-close-btn{line-height:1}
+.att-preview-body{flex:1;overflow:hidden;display:flex;background:#fff}
+.att-preview-body iframe{width:100%;height:100%;border:0;background:#fff}
+body.att-preview-modal-open{overflow:hidden}
