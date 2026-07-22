@@ -65,6 +65,26 @@ function ats_find_by_no($atsNo)
 }
 
 /**
+ * True if $atsNo is already used by an ATS other than the optionally
+ * excluded one. Used to enforce uniqueness when an operator supplies a
+ * custom ATS number on the job-card ATS step (QC flagged "ATS needed").
+ *
+ * The ats table's uq_ats_no UNIQUE key is the canonical source of
+ * truth; job_cards.ats_no is only a denormalised mirror of it, so
+ * checking ats here is sufficient.
+ */
+function ats_no_in_use($atsNo, $excludeAtsId = 0)
+{
+    $atsNo = trim((string)$atsNo);
+    if ($atsNo === '') return false;
+    $row = db_one(
+        "SELECT id FROM ats WHERE ats_no = ? AND id <> ? LIMIT 1",
+        [$atsNo, (int)$excludeAtsId]
+    );
+    return $row !== null;
+}
+
+/**
  * Find the ATS attached to a given job card (1:1 since the new model).
  */
 function ats_find_by_job_card($jobCardId)
@@ -101,15 +121,24 @@ function ats_lines($atsId)
  * Re-saves of the same job card update qty/line_no on the existing
  * line in place (the UNIQUE on ats_lines prevents duplicate rows).
  *
- * The ATS number is generated via code_next('ats') the FIRST time
- * we create the row, then never changes.
+ * ATS number:
+ *   - $customAtsNo empty/null → generated via code_next('ats') the
+ *     FIRST time the row is created, then left unchanged on re-saves.
+ *   - $customAtsNo supplied → used verbatim (any characters). On a
+ *     fresh row it becomes the ats_no; on an existing row it RENAMES
+ *     the ats_no when it differs. Callers pass this only when QC
+ *     flagged "ATS needed" = Yes and the operator typed a number.
+ *     Uniqueness is enforced here (backstop) against the ats table's
+ *     uq_ats_no key — a clash throws so the surrounding transaction
+ *     rolls back.
  *
  * Refuses if the job card already has an ATS in 'locked' status —
  * billing has progressed past Applied and we must not silently
  * tamper with the line.
  */
-function ats_create_for_job_card(array $jc, $actorId = null)
+function ats_create_for_job_card(array $jc, $actorId = null, $customAtsNo = null)
 {
+    $customAtsNo = $customAtsNo !== null ? trim((string)$customAtsNo) : '';
     $jcId = (int)($jc['id'] ?? 0);
     if ($jcId <= 0) {
         throw new \RuntimeException('ats_create_for_job_card: job card id required.');
@@ -144,6 +173,19 @@ function ats_create_for_job_card(array $jc, $actorId = null)
                 $existing['ats_no']
             ));
         }
+        // Operator-supplied custom number renames the existing ATS when
+        // it differs. Uniqueness backstop excludes this ATS's own id so
+        // re-saving the same number is a no-op.
+        if ($customAtsNo !== '' && $customAtsNo !== (string)$existing['ats_no']) {
+            if (ats_no_in_use($customAtsNo, (int)$existing['id'])) {
+                throw new \RuntimeException(sprintf(
+                    'ATS number "%s" is already in use — choose a unique number.',
+                    $customAtsNo
+                ));
+            }
+            db_exec("UPDATE ats SET ats_no = ? WHERE id = ?",
+                    [$customAtsNo, (int)$existing['id']]);
+        }
         ats_upsert_line($existing['id'], $jc);
         if ($existing['status'] === 'pushed') {
             db_exec("UPDATE ats SET status = 'draft' WHERE id = ?", [(int)$existing['id']]);
@@ -151,8 +193,19 @@ function ats_create_for_job_card(array $jc, $actorId = null)
         return (int)$existing['id'];
     }
 
-    // Fresh ATS — generate number + create header + single line.
-    $atsNo = code_next('ats');
+    // Fresh ATS — use the operator's custom number if supplied (unique
+    // backstop below), otherwise generate one via code_next('ats').
+    if ($customAtsNo !== '') {
+        if (ats_no_in_use($customAtsNo)) {
+            throw new \RuntimeException(sprintf(
+                'ATS number "%s" is already in use — choose a unique number.',
+                $customAtsNo
+            ));
+        }
+        $atsNo = $customAtsNo;
+    } else {
+        $atsNo = code_next('ats');
+    }
     db_exec(
         "INSERT INTO ats (ats_no, job_card_id, po_no, ats_date, status, created_by)
               VALUES (?, ?, ?, CURDATE(), 'draft', ?)",

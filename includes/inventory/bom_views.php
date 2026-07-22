@@ -735,7 +735,7 @@ if ($action === 'bom_view') {
                  * as a single <li> with the product info; each child
                  * BOM line becomes a nested <li>.
                  */
-                function render_bom_node($node, $depth = 0) {
+                function render_bom_node($node, $depth = 0, $canTakeOut = false, $rootId = 0) {
                     $item = $node['item'];
                     $hasKids = !empty($node['children']);
                     $stockLow = (float)$item['stock_on_hand'] < $node['qty'];
@@ -769,17 +769,22 @@ if ($action === 'bom_view') {
                                       title="Current stock on hand for this item">
                                     stock: <?= number_format((float)$item['stock_on_hand'], 3) ?>
                                 </span>
+                                <?php if ($canTakeOut): ?>
+                                    <a class="btn btn-icon btn-sm bom-takeout"
+                                       href="<?= h(url('/inventory.php?action=take_out&item_id=' . (int)$item['id'] . '&ret=bom&ret_id=' . (int)$rootId)) ?>"
+                                       title="Take out stock of this item from a location" aria-label="Take out">⏏</a>
+                                <?php endif; ?>
                             </div>
                         </div>
                         <?php if ($hasKids): ?>
                             <ul class="bom-children" role="group">
-                                <?php foreach ($node['children'] as $c) render_bom_node($c, $depth + 1); ?>
+                                <?php foreach ($node['children'] as $c) render_bom_node($c, $depth + 1, $canTakeOut, $rootId); ?>
                             </ul>
                         <?php endif; ?>
                     </li>
                     <?php
                 }
-                render_bom_node($tree, 0);
+                render_bom_node($tree, 0, $canManageItems, (int)$id);
                 ?>
             </ul>
         <?php endif; ?>

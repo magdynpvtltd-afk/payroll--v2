@@ -2087,6 +2087,13 @@ if ($action === 'receive_save') {
     $locId  = (int)input('dst_location_id', 0);
     $notes  = trim((string)input('notes', ''));
 
+    // Where success lands. The unified-list quick-receive posts return=list
+    // so the operator stays on that browse feed; the shipment-view form (no
+    // return flag) keeps its existing behaviour of staying on the shipment.
+    $backUrl = (input('return') === 'list')
+        ? url('/inventory_shiprcpt.php')
+        : url('/inventory_shiprcpt.php?action=view&id=' . $id);
+
     $sh = db_one('SELECT * FROM inv_shipments WHERE id = ?', [$id]);
     if (!$sh) { flash_set('error', 'Shipment not found.'); redirect(url('/inventory_shiprcpt.php')); }
     $line = db_one(
@@ -2129,6 +2136,26 @@ if ($action === 'receive_save') {
     }
     $locId = $qchLocId;
 
+    // LIP override — the operator can tick "Receive directly to Lost In
+    // Process" on either receipt form (the shipment-view "Record a receipt"
+    // form and the unified-list quick-receive modal). When set, the qty
+    // bypasses QC routing entirely and is parked in the LOC-LIP held bucket:
+    // tracked on-hand but NOT available for consumption, and NOT invoiceable
+    // (the invoice linker excludes LIP receipts). Resolve the location
+    // up-front so a missing seed fails fast, same as LOC-QCH above. $locId
+    // is pointed at LIP here so the asset / pending-asset branches (which
+    // read $locId) route there too.
+    $toLip = in_array((string)input('to_lip', ''), ['1', 'on', 'true'], true);
+    $lipLocId = 0;
+    if ($toLip) {
+        $lipLocId = qc_loc_id('LOC-LIP');
+        if (!$lipLocId) {
+            flash_set('error', 'LOC-LIP (Lost In Process) location is missing. Ask an admin to seed it before receiving to LIP.');
+            redirect($backUrl);
+        }
+        $locId = $lipLocId;
+    }
+
     $uid = (int)current_user_id();
     $entity = $line['entity_type'] ?? 'inv_item';
 
@@ -2162,7 +2189,7 @@ if ($action === 'receive_save') {
             [$uid, $id, $sh['ship_no'] . ' asset ' . $line['asset_id']]
         );
         flash_set('success', 'Asset receipt recorded.');
-        redirect(url('/inventory_shiprcpt.php?action=view&id=' . $id));
+        redirect($backUrl);
     }
 
     // ---- Phase C — pending (not-yet-existing) item branch ----
@@ -2204,11 +2231,12 @@ if ($action === 'receive_save') {
                       WHERE id = ?",
                     [$assetId, (int)$line['id']]
                 );
-                // 4. Record the asset receipt into QC Hold + close the line.
+                // 4. Record the asset receipt into QC Hold (or LOC-LIP when
+                //    the operator forced LIP) + close the line.
                 asset_txn_record(
                     $assetId,
                     'receive_vendor',
-                    ['to_location_id' => $qchLocId],
+                    ['to_location_id' => $locId],
                     $uid,
                     'Auto: received via ' . $sh['ship_no']
                 );
@@ -2226,8 +2254,9 @@ if ($action === 'receive_save') {
                 "INSERT INTO audit_log (actor_id, action, target_id, details) VALUES (?, 'shiprcpt.receive_asset', ?, ?)",
                 [$uid, $id, $sh['ship_no'] . ' new asset ' . $assetTag . ' (' . $pendingName . ')']
             );
-            flash_set('success', 'New asset ' . $assetTag . ' created and received at LOC-QCH.');
-            redirect(url('/inventory_shiprcpt.php?action=view&id=' . $id));
+            flash_set('success', 'New asset ' . $assetTag . ' created and received at '
+                . ($toLip ? 'LOC-LIP (Lost In Process).' : 'LOC-QCH.'));
+            redirect($backUrl);
         }
 
         // Default: materialise as an inventory item. Mint the code from
@@ -2258,19 +2287,29 @@ if ($action === 'receive_save') {
         }
     }
 
-    // Per-item destination: with an active inspection template the qty
-    // goes to QC Hold and an inspection is auto-created below; without
-    // one it goes straight to stores (ST-HLD) and no inspection is made.
-    $tplId = qc_item_template_id((int)$line['item_id']);
-    if ($tplId) {
-        $locId = $qchLocId;
+    // Per-item destination. A forced LIP receipt wins over everything: park
+    // the qty in LOC-LIP as held stock and skip QC (no template routing, no
+    // inspection). Otherwise the normal rule applies — an item with an active
+    // inspection template goes to QC Hold and gets an auto-inspection; an
+    // item without one goes straight to stores (ST-HLD) with no inspection.
+    if ($toLip) {
+        $tplId    = 0;            // held bucket — never create a QC inspection
+        $locId    = $lipLocId;
+        $destCode = 'LOC-LIP';
     } else {
-        $stHldId = qc_loc_id('ST-HLD');
-        if (!$stHldId) {
-            flash_set('error', 'ST-HLD (stores) location is missing. Run the migration that seeds it.');
-            redirect(url('/inventory_shiprcpt.php?action=view&id=' . $id));
+        $tplId = qc_item_template_id((int)$line['item_id']);
+        if ($tplId) {
+            $locId    = $qchLocId;
+            $destCode = 'LOC-QCH';
+        } else {
+            $stHldId = qc_loc_id('ST-HLD');
+            if (!$stHldId) {
+                flash_set('error', 'ST-HLD (stores) location is missing. Run the migration that seeds it.');
+                redirect(url('/inventory_shiprcpt.php?action=view&id=' . $id));
+            }
+            $locId    = $stHldId;
+            $destCode = 'ST-HLD';
         }
-        $locId = $stHldId;
     }
 
     try {
@@ -2320,7 +2359,9 @@ if ($action === 'receive_save') {
             $rGst   = input('gst_pct', null);
             $rPrice = ($rPrice === '' || $rPrice === null) ? null : (float)$rPrice;
             $rGst   = ($rGst   === '' || $rGst   === null) ? null : (float)$rGst;
-            if (($rPrice !== null || $rGst !== null) && !empty($line['item_id'])) {
+            // LIP receipts are non-invoiceable, so don't seed the receive-side
+            // pricing row from them — that row exists purely to feed invoicing.
+            if (!$toLip && ($rPrice !== null || $rGst !== null) && !empty($line['item_id'])) {
                 $existing = db_one(
                     "SELECT id FROM inv_shipment_receive_lines WHERE shipment_id = ? AND item_id = ?",
                     [$id, (int)$line['item_id']]
@@ -2352,15 +2393,20 @@ if ($action === 'receive_save') {
         flash_set('error', 'Receipt failed: ' . $e->getMessage());
         redirect(url('/inventory_shiprcpt.php?action=view&id=' . $id));
     }
-    $destCode = $tplId ? 'LOC-QCH' : 'ST-HLD';
+    // $destCode was set alongside the per-item destination decision above.
     db_exec(
         "INSERT INTO audit_log (actor_id, action, target_id, details) VALUES (?, 'shiprcpt.receive', ?, ?)",
         [$uid, $id, $sh['ship_no'] . ' line ' . $line['id'] . ' qty ' . $qty . ' to ' . $destCode]
     );
-    flash_set('success', $tplId
-        ? 'Receipt recorded at LOC-QCH; inspection pending.'
-        : 'Receipt recorded; qty added to stores (ST-HLD). No template — QC skipped.');
-    redirect(url('/inventory_shiprcpt.php?action=view&id=' . $id));
+    if ($toLip) {
+        flash_set('success', 'Receipt recorded; qty parked in Lost In Process (LOC-LIP). '
+            . 'Held stock — not available for consumption, and not invoiceable.');
+    } elseif ($tplId) {
+        flash_set('success', 'Receipt recorded at LOC-QCH; inspection pending.');
+    } else {
+        flash_set('success', 'Receipt recorded; qty added to stores (ST-HLD). No template — QC skipped.');
+    }
+    redirect($backUrl);
 }
 
 // ----------------------------------------------------------------
@@ -4628,6 +4674,11 @@ if ($action === 'view') {
                             there once it's approved. Items with no template are added straight
                             to stores (<strong>ST-HLD</strong>) with no inspection.
                         </div>
+                        <label style="font-weight:400; display:flex; gap:6px; align-items:flex-start; padding-top:2px;">
+                            <input type="checkbox" name="to_lip" value="1" style="margin-top:3px;">
+                            <span>Receive directly to <strong>LIP</strong> (Lost In Process)
+                                <span class="muted small">— skips QC; parks as held stock, not invoiceable.</span></span>
+                        </label>
                         <input type="hidden" name="dst_location_id" value="">
                     </div>
                     <div class="field">
@@ -4808,11 +4859,19 @@ $baseUnion = "
           (SELECT id    FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_id,
           sl.old_transaction_id                AS old_transaction_id,
           sl.id                                AS shipment_line_id,
-          r.txn_id                             AS inv_txn_id
+          r.txn_id                             AS inv_txn_id,
+          sl.line_kind                         AS line_kind,
+          -- UOM of THIS line: line uom_id first, then the item's default
+          -- uom, then the pending-line uom (for typed-but-not-yet-created
+          -- items). Matches the priority used by the ship-line pricing query.
+          COALESCE(su.label, iu.label, pu.label) AS uom_label
         FROM inv_receipts r
         JOIN inv_shipments sh        ON sh.id = r.shipment_id
         JOIN inv_shipment_lines sl   ON sl.id = r.shipment_line_id
    LEFT JOIN inv_items i             ON i.id  = sl.item_id
+   LEFT JOIN inv_uom   su            ON su.id = sl.uom_id
+   LEFT JOIN inv_uom   iu            ON iu.id = i.uom_id
+   LEFT JOIN inv_uom   pu            ON pu.id = sl.pending_uom_id
    LEFT JOIN assets    a             ON a.id  = sl.asset_id
    LEFT JOIN asset_models am         ON am.id = a.model_id
    LEFT JOIN vendors v               ON v.id  = sh.vendor_id
@@ -4858,10 +4917,18 @@ $baseUnion = "
           -- Ship-out txns aren't 1:1 with a ship line (a line can split
           -- across several source locations → several ship_out txns), so
           -- there's no single internal txn id to surface here.
-          NULL                                 AS inv_txn_id
+          NULL                                 AS inv_txn_id,
+          sl.line_kind                         AS line_kind,
+          -- UOM of THIS line: line uom_id first, then the item's default
+          -- uom, then the pending-line uom (for typed-but-not-yet-created
+          -- items). Matches the priority used by the ship-line pricing query.
+          COALESCE(su.label, iu.label, pu.label) AS uom_label
         FROM inv_shipment_lines sl
         JOIN inv_shipments sh        ON sh.id = sl.shipment_id
    LEFT JOIN inv_items i             ON i.id  = sl.item_id
+   LEFT JOIN inv_uom   su            ON su.id = sl.uom_id
+   LEFT JOIN inv_uom   iu            ON iu.id = i.uom_id
+   LEFT JOIN inv_uom   pu            ON pu.id = sl.pending_uom_id
    LEFT JOIN assets    a             ON a.id  = sl.asset_id
    LEFT JOIN asset_models am         ON am.id = a.model_id
    LEFT JOIN vendors v               ON v.id  = sh.vendor_id
@@ -4917,10 +4984,18 @@ $baseUnion = "
           (SELECT id    FROM purchase_orders WHERE shipment_id = sh.id ORDER BY id DESC LIMIT 1) AS po_id,
           sl.old_transaction_id                AS old_transaction_id,
           sl.id                                AS shipment_line_id,
-          NULL                                 AS inv_txn_id
+          NULL                                 AS inv_txn_id,
+          sl.line_kind                         AS line_kind,
+          -- UOM of THIS line: line uom_id first, then the item's default
+          -- uom, then the pending-line uom (for typed-but-not-yet-created
+          -- items). Matches the priority used by the ship-line pricing query.
+          COALESCE(su.label, iu.label, pu.label) AS uom_label
         FROM inv_shipment_lines sl
         JOIN inv_shipments sh    ON sh.id = sl.shipment_id
    LEFT JOIN inv_items i         ON i.id  = sl.item_id
+   LEFT JOIN inv_uom   su        ON su.id = sl.uom_id
+   LEFT JOIN inv_uom   iu        ON iu.id = i.uom_id
+   LEFT JOIN inv_uom   pu        ON pu.id = sl.pending_uom_id
    LEFT JOIN assets    a         ON a.id  = sl.asset_id
    LEFT JOIN asset_models am     ON am.id = a.model_id
    LEFT JOIN vendors v           ON v.id  = sh.vendor_id
@@ -4980,10 +5055,18 @@ $baseUnion = "
           sl.old_transaction_id                AS old_transaction_id,
           sl.id                                AS shipment_line_id,
           -- Imported received receipts are audit-only — no inv_txns row.
-          NULL                                 AS inv_txn_id
+          NULL                                 AS inv_txn_id,
+          sl.line_kind                         AS line_kind,
+          -- UOM of THIS line: line uom_id first, then the item's default
+          -- uom, then the pending-line uom (for typed-but-not-yet-created
+          -- items). Matches the priority used by the ship-line pricing query.
+          COALESCE(su.label, iu.label, pu.label) AS uom_label
         FROM inv_shipment_lines sl
         JOIN inv_shipments sh        ON sh.id = sl.shipment_id
    LEFT JOIN inv_items i             ON i.id  = sl.item_id
+   LEFT JOIN inv_uom   su            ON su.id = sl.uom_id
+   LEFT JOIN inv_uom   iu            ON iu.id = i.uom_id
+   LEFT JOIN inv_uom   pu            ON pu.id = sl.pending_uom_id
    LEFT JOIN assets    a             ON a.id  = sl.asset_id
    LEFT JOIN asset_models am         ON am.id = a.model_id
    LEFT JOIN vendors v               ON v.id  = sh.vendor_id
@@ -5040,6 +5123,7 @@ $dtCfg = [
          // branch (NULL code) doesn't blow up the CONCAT result.
          'sql_col'=>"CONCAT('(', COALESCE(e.item_code,''), ')-', COALESCE(e.item_name,''))"],
         ['key'=>'qty',           'label'=>'Qty',          'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.qty',          'th_class'=>'r','td_class'=>'r'],
+        ['key'=>'uom',           'label'=>'UOM',          'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.uom_label'],
         ['key'=>'direction',     'label'=>'Direction',    'sortable'=>true, 'sql_col'=>'e.direction',
          'filter' => ['type'=>'select','placeholder'=>'all','options'=>[
              ['value'=>'receive',  'label'=>'Receipt (incoming)'],
@@ -5062,6 +5146,10 @@ $dtCfg = [
              ['value'=>'1', 'label'=>'Available'],
              ['value'=>'0', 'label'=>'Not available'],
          ]]],
+        // Internal transaction id — the same "Txn ID" shown on the
+        // Transaction history page (inv_txns.id). Only receipt events are
+        // 1:1 with an inv_txns row (via inv_receipts.txn_id); other rows show "—".
+        ['key'=>'inv_txn_id',    'label'=>'Internal Txn ID', 'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.inv_txn_id', 'th_class'=>'r','td_class'=>'r'],
         ['key'=>'_actions',      'label'=>'Actions',      'sortable'=>false,'searchable'=>false, 'th_class'=>'r','td_class'=>'r nowrap'],
 
         // ---- Hidden by default (available via the ⚙ Columns panel) ----
@@ -5072,11 +5160,6 @@ $dtCfg = [
              ['value'=>'both',    'label'=>'Both'],
          ]]],
         ['key'=>'old_txn',       'label'=>'Txn ID',       'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.old_transaction_id', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
-        // Internal transaction id — the same "Txn ID" shown on the
-        // Transaction history page (inv_txns.id). Only receipt events are
-        // 1:1 with an inv_txns row (via inv_receipts.txn_id); other rows
-        // show "—".
-        ['key'=>'inv_txn_id',    'label'=>'Internal Txn ID', 'sortable'=>true, 'searchable'=>true,  'sql_col'=>'e.inv_txn_id', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
         ['key'=>'line_qty_planned', 'label'=>'Planned',    'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.line_qty_planned', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
         ['key'=>'line_count',    'label'=>'Lines',        'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.line_count',    'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
         ['key'=>'receipt_count', 'label'=>'Receipts',     'sortable'=>true, 'searchable'=>false, 'sql_col'=>'e.receipt_count', 'th_class'=>'r','td_class'=>'r', 'default_hidden'=>true],
@@ -5230,6 +5313,39 @@ $rowRenderer = function ($r) use ($canManage, &$shrNoteCounts, &$shrTxnCounts, &
                   . '">✎ <span class="dt-action-label">Edit</span></a>';
     }
 
+    // Receive — quick action for a PLANNED receive line that still has open
+    // qty on an approved/shipped shipment. Opens the inline modal (rendered
+    // once below the table) prefilled for THIS line; the modal posts to
+    // receive_save with return=list so the operator lands back on this feed.
+    // Gated on the LINE fact (planned + line_kind=receive), so it only shows
+    // on rows that actually have something left to receive.
+    if ($canManage
+        && $r['direction'] === 'planned'
+        && ($r['line_kind'] ?? '') === 'receive'
+        && in_array($sStatus, ['approved', 'shipped'], true)
+        && (int)($r['shipment_line_id'] ?? 0) > 0) {
+        // Remaining open qty (planned − received) is already projected into
+        // line_qty_planned for planned rows.
+        $openQ    = max(0.0, (float)($r['line_qty_planned'] ?? 0));
+        $openAttr = rtrim(rtrim(number_format($openQ, 3, '.', ''), '0'), '.');
+        // A pending "new item" line has neither a real item nor an asset, so
+        // both item_id and item_code come back empty — that's what tells the
+        // modal to show the inventory-vs-asset chooser.
+        $isPending = empty($r['item_id']) && (string)($r['item_code'] ?? '') === '';
+        $code = (string)($r['item_code'] ?? '');
+        $name = (string)($r['item_name'] ?? '');
+        $itemLabel = $code !== '' ? '(' . $code . ')-' . $name : ($name !== '' ? $name . ' (new item)' : 'item');
+        $actions .= ' <a href="#" class="btn btn-icon shr-receive-btn"'
+                  . ' title="Receive this item" aria-label="Receive this item"'
+                  . ' data-shipment-id="' . (int)$r['shipment_id'] . '"'
+                  . ' data-line-id="' . (int)$r['shipment_line_id'] . '"'
+                  . ' data-open="' . h($openAttr) . '"'
+                  . ' data-pending="' . ($isPending ? '1' : '0') . '"'
+                  . ' data-item="' . h($itemLabel) . '"'
+                  . ' data-ship-no="' . h((string)($r['ship_no'] ?? '')) . '">'
+                  . '📥 <span class="dt-action-label">Receive</span></a>';
+    }
+
     // Running notes — opens the standard composer (body + file attachments).
     // The note TARGET depends on the row:
     //   • Receipt rows carry a specific internal txn id (inv_receipts.txn_id).
@@ -5332,6 +5448,7 @@ $rowRenderer = function ($r) use ($canManage, &$shrNoteCounts, &$shrTxnCounts, &
         'vendor'        => $vendor,
         'item_label'    => $itemCell,
         'qty'           => $qtyCell,
+        'uom'           => h($r['uom_label'] ?: '—'),
         'line_qty_planned' => $plannedCell,
         'line_count'    => $lineCount   ?: '<span class="muted">—</span>',
         'receipt_count' => $receiptCount ?: '<span class="muted">—</span>',
@@ -5388,4 +5505,153 @@ require __DIR__ . '/includes/header.php';
 data_table_render($dtCfg, $dt, $rowRenderer);
 shr_txn_notes_popup_assets();   // clip-icon popup CSS + JS (emitted once)
 notes_popup_assets();           // running-notes composer modal (📝 Notes action)
+
+// ----------------------------------------------------------------
+// Quick-receive modal — powers the 📥 Receive row action on planned
+// receive lines. Rendered once here (managers only); the delegated JS
+// below fills it from the clicked button's data-* attributes and posts
+// to receive_save (with return=list, so we come back to this feed).
+// Server-side receive_save owns all the real validation + QC routing;
+// this is just a compact launcher for the common case.
+// ----------------------------------------------------------------
+if ($canManage):
+?>
+<div id="shr-receive-modal" class="shr-rcv-backdrop" style="display:none;" aria-hidden="true">
+  <div class="shr-rcv-dialog" role="dialog" aria-modal="true" aria-labelledby="shr-rcv-title">
+    <div class="shr-rcv-head">
+      <h3 id="shr-rcv-title" style="margin:0;">Receive item</h3>
+      <button type="button" class="shr-rcv-close" aria-label="Close" title="Close">&times;</button>
+    </div>
+    <p class="muted small" id="shr-rcv-item" style="margin:2px 0 12px;">&mdash;</p>
+    <form method="post" action="<?= h(url('/inventory_shiprcpt.php?action=receive_save')) ?>">
+      <?= csrf_field() ?>
+      <input type="hidden" name="return" value="list">
+      <input type="hidden" name="id" id="shr-rcv-ship-id" value="">
+      <input type="hidden" name="shipment_line_id" id="shr-rcv-line-id" value="">
+      <!-- Destination is decided server-side (LOC-QCH / ST-HLD); kept blank. -->
+      <input type="hidden" name="dst_location_id" value="">
+
+      <!-- New-item type chooser — revealed only for pending "new item" lines -->
+      <div class="field" id="shr-rcv-create-as" style="display:none; margin-bottom:10px;">
+        <label>This is a <strong>new item</strong> — create it as</label>
+        <div style="display:flex; gap:18px; padding:4px 0;">
+          <label style="font-weight:400;"><input type="radio" name="create_as" value="inventory" checked> Inventory item <span class="muted small">(I-NNNNN)</span></label>
+          <label style="font-weight:400;"><input type="radio" name="create_as" value="asset"> Asset <span class="muted small">(A-NNNNN)</span></label>
+        </div>
+      </div>
+
+      <div class="shr-rcv-grid">
+        <div class="field">
+          <label>Qty</label>
+          <input type="number" step="0.001" min="0.001" name="qty_received" id="shr-rcv-qty" required placeholder="0">
+          <small class="muted" id="shr-rcv-qty-hint" style="display:none;"></small>
+        </div>
+        <div class="field">
+          <label>Price (each)</label>
+          <input type="number" step="0.01" min="0" name="price" placeholder="0.00">
+        </div>
+        <div class="field">
+          <label>GST %</label>
+          <input type="number" step="0.01" min="0" max="100" name="gst_pct" placeholder="18">
+        </div>
+        <div class="field">
+          <label>Receipt date</label>
+          <input type="date" name="receipt_date" value="<?= h(date('Y-m-d')) ?>" required>
+        </div>
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <label>Notes</label>
+        <input type="text" name="notes" maxlength="255">
+      </div>
+      <label style="font-weight:400; display:flex; gap:8px; align-items:flex-start; margin-top:12px;">
+        <input type="checkbox" name="to_lip" id="shr-rcv-to-lip" value="1" style="margin-top:3px;">
+        <span>Receive directly to <strong>LIP</strong> (Lost In Process)
+          <span class="muted small">— skips QC; parks the qty as held stock, not available for consumption and not invoiceable.</span></span>
+      </label>
+      <p class="muted small" style="margin:10px 0 0;">
+        Items with an inspection template land at <strong>LOC-QCH</strong> (Quality Check Hold)
+        pending inspection; items with no template are added straight to stores (<strong>ST-HLD</strong>).
+      </p>
+      <div class="shr-rcv-actions">
+        <button type="button" class="btn shr-rcv-close">Cancel</button>
+        <button type="submit" class="btn btn-primary">Record receipt</button>
+      </div>
+    </form>
+  </div>
+</div>
+<style>
+  .shr-rcv-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:1000;
+        display:flex; align-items:flex-start; justify-content:center; padding:6vh 16px; overflow:auto; }
+  .shr-rcv-dialog { background:var(--card,#fff); color:inherit; border-radius:12px; width:100%;
+        max-width:640px; box-shadow:0 20px 50px rgba(0,0,0,.3); padding:20px 22px; }
+  .shr-rcv-head { display:flex; align-items:center; justify-content:space-between; }
+  .shr-rcv-close { background:none; border:none; font-size:26px; line-height:1; cursor:pointer;
+        color:var(--muted,#64748b); padding:0 4px; }
+  .shr-rcv-grid { display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:10px; }
+  .shr-rcv-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+  @media (max-width:560px){ .shr-rcv-grid { grid-template-columns:1fr 1fr; } }
+</style>
+<script>
+(function () {
+    var modal   = document.getElementById('shr-receive-modal');
+    if (!modal) return;
+    var shipId  = document.getElementById('shr-rcv-ship-id');
+    var lineId  = document.getElementById('shr-rcv-line-id');
+    var qty     = document.getElementById('shr-rcv-qty');
+    var hint    = document.getElementById('shr-rcv-qty-hint');
+    var itemEl  = document.getElementById('shr-rcv-item');
+    var createAs = document.getElementById('shr-rcv-create-as');
+    var toLip   = document.getElementById('shr-rcv-to-lip');
+
+    function openModal() { modal.style.display = 'flex'; modal.setAttribute('aria-hidden', 'false'); }
+    function closeModal() { modal.style.display = 'none'; modal.setAttribute('aria-hidden', 'true'); }
+
+    function syncQtyValidity() {
+        var max = parseFloat(qty.getAttribute('max'));
+        var entered = parseFloat(qty.value);
+        if (!isNaN(max) && !isNaN(entered) && entered > max + 0.0001) {
+            qty.setCustomValidity('Qty cannot exceed the open quantity (' + max + ').');
+        } else {
+            qty.setCustomValidity('');
+        }
+    }
+
+    // Delegated: the 📥 Receive buttons live inside datatable gear dropdowns
+    // that are re-rendered on every AJAX page/sort/filter, so bind on document.
+    document.addEventListener('click', function (e) {
+        var btn = e.target.closest && e.target.closest('.shr-receive-btn');
+        if (btn) {
+            e.preventDefault();
+            var open    = btn.getAttribute('data-open') || '';
+            var pending = btn.getAttribute('data-pending') === '1';
+            shipId.value = btn.getAttribute('data-shipment-id') || '';
+            lineId.value = btn.getAttribute('data-line-id') || '';
+            itemEl.innerHTML = '<strong>' + (btn.getAttribute('data-ship-no') || '') + '</strong> &middot; '
+                + (btn.getAttribute('data-item') || '')
+                + (open !== '' ? ' &middot; open: <strong>' + open + '</strong>' : '');
+            // Prefill qty with the full open amount and cap the input at it.
+            if (open !== '') { qty.value = open; qty.setAttribute('max', open);
+                hint.textContent = 'Open: ' + open + ' max'; hint.style.display = ''; }
+            else { qty.value = ''; qty.removeAttribute('max'); hint.style.display = 'none'; }
+            createAs.style.display = pending ? '' : 'none';
+            // Reset the LIP toggle each time — the modal is reused across rows.
+            if (toLip) toLip.checked = false;
+            // A pending line has no confirmed price context; leave price/gst blank.
+            syncQtyValidity();
+            openModal();
+            setTimeout(function () { qty.focus(); qty.select(); }, 30);
+            return;
+        }
+        // Close on the × / Cancel buttons or a click on the backdrop itself.
+        if (e.target.closest && e.target.closest('.shr-rcv-close')) { closeModal(); return; }
+        if (e.target === modal) { closeModal(); }
+    });
+    qty.addEventListener('input', syncQtyValidity);
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && modal.style.display !== 'none') closeModal();
+    });
+})();
+</script>
+<?php endif;
+
 require __DIR__ . '/includes/footer.php';

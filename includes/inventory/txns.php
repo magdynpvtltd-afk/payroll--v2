@@ -810,6 +810,206 @@ if ($action === 'move') {
 }
 
 // ============================================================
+// take_out / take_out_save — remove qty of ONE item from a chosen
+// location (a scoped "issue"). Reachable from the item list and the
+// BOM tree via a "Take Out" button.
+// ============================================================
+// Form (GET): /inventory.php?action=take_out&item_id=NN[&src_location_id=NN][&ret=…][&ret_id=NN]
+// Save (POST): /inventory.php?action=take_out_save
+//
+// Posts a single 'issue' txn through inv_post_txn() with -qty. The note
+// is tagged "Take out" so the ledger reads clearly. inv_post_txn rejects
+// the delta if it would push the location balance below zero. The txn_type
+// stays 'issue' (the inv_txns enum has no dedicated take_out value; taking
+// stock out of a location IS an issue), so it shows up in the ledger and
+// transaction history under the existing Issue filter.
+// ============================================================
+if ($action === 'take_out_save') {
+    csrf_check();
+    if (!$canManageItems) require_permission('inventory_view_items', 'manage');
+
+    $itemId  = (int)input('item_id', 0);
+    $locId   = (int)input('location_id', 0);
+    $qty     = (float)input('qty', 0);
+    $txnDate = (string)input('txn_date', date('Y-m-d'));
+    $refDoc  = trim((string)input('ref_doc')) ?: null;
+    $notesIn = trim((string)input('notes'));
+    $ret     = (string)input('ret', '');
+    $retId   = (int)input('ret_id', 0);
+
+    // Resolve the "success" landing + the "bounce back on error" URLs from a
+    // small whitelist so a hand-crafted ret can't turn this into an open
+    // redirect. Default landing is the item's ledger.
+    $backUrl = url('/inventory.php?action=ledger&id=' . $itemId);
+    if ($ret === 'items') {
+        $backUrl = url('/inventory.php?action=items');
+    } elseif ($ret === 'bom' && $retId > 0) {
+        $backUrl = url('/inventory.php?action=bom_view&id=' . $retId);
+    }
+    $formUrl = url('/inventory.php?action=take_out&item_id=' . $itemId
+        . ($locId ? '&src_location_id=' . $locId : '')
+        . ($ret !== '' ? '&ret=' . urlencode($ret) : '')
+        . ($retId ? '&ret_id=' . $retId : ''));
+
+    $errors = [];
+    if (!$itemId)  $errors[] = 'Item is required.';
+    if (!$locId)   $errors[] = 'Location is required.';
+    if ($qty <= 0) $errors[] = 'Quantity must be greater than zero.';
+    if ($errors) {
+        foreach ($errors as $e) flash_set('error', $e);
+        redirect($formUrl);
+    }
+
+    // Ledger note — always tagged "Take out" for traceability, plus the
+    // operator's free-text note when supplied.
+    $note = 'Take out';
+    if ($notesIn !== '') $note .= ' — ' . $notesIn;
+
+    try {
+        db()->beginTransaction();
+        inv_post_txn('issue', $txnDate, $itemId, $locId, -$qty, null, $refDoc, $note);
+        db()->commit();
+        $item = db_one('SELECT code FROM inv_items WHERE id = ?', [$itemId]);
+        $qtyStr = rtrim(rtrim(number_format($qty, 3), '0'), '.');
+        db_exec("INSERT INTO audit_log (actor_id, action, target_id, details) VALUES (?, 'inventory.take_out', ?, ?)",
+            [current_user_id(), $itemId,
+             sprintf('%s x %s from location #%d', ($item['code'] ?? '#' . $itemId), $qtyStr, $locId)]);
+        flash_set('success', sprintf('Took out %s from stock.', $qtyStr));
+    } catch (Exception $e) {
+        if (db()->inTransaction()) db()->rollBack();
+        flash_set('error', 'Take out failed: ' . $e->getMessage());
+        redirect($formUrl);
+    }
+    redirect($backUrl);
+}
+
+if ($action === 'take_out') {
+    if (!$canManageItems) require_permission('inventory_view_items', 'manage');
+
+    $itemId = (int)input('item_id', 0);
+    $item = db_one(
+        "SELECT id, code, COALESCE(NULLIF(short_description, ''), name) AS name
+           FROM inv_items WHERE id = ?",
+        [$itemId]
+    );
+    if (!$item) {
+        flash_set('error', 'Item not found.');
+        redirect(url('/inventory.php?action=items'));
+    }
+
+    // Locations where this item currently holds stock (> 0), with qty for
+    // the live "available" hint. Zero / negative rows are excluded — there's
+    // nothing to take out there.
+    $stockRows = db_all(
+        'SELECT s.location_id, s.qty, l.code, l.name
+           FROM inv_item_location_stock s
+           JOIN locations l ON l.id = s.location_id
+          WHERE s.item_id = ? AND s.qty > 0
+          ORDER BY l.sort_order, l.name',
+        [$itemId]
+    );
+    $stockMap = [];
+    foreach ($stockRows as $r) $stockMap[(int)$r['location_id']] = (float)$r['qty'];
+
+    $preSrcLocId = (int)input('src_location_id', 0);
+    $ret   = (string)input('ret', '');
+    $retId = (int)input('ret_id', 0);
+
+    // Where Cancel / Back returns to (same whitelist as the save handler).
+    $backUrl = url('/inventory.php?action=ledger&id=' . $itemId);
+    if ($ret === 'items') {
+        $backUrl = url('/inventory.php?action=items');
+    } elseif ($ret === 'bom' && $retId > 0) {
+        $backUrl = url('/inventory.php?action=bom_view&id=' . $retId);
+    }
+
+    $page_title  = 'Take out stock';
+    $page_module = 'inventory_view_items';
+    $focus_id    = 'f_loc';
+    require dirname(__DIR__, 2) . '/includes/header.php';
+    ?>
+    <div class="form-page">
+        <?= form_toolbar([
+            'title'       => 'Take out stock',
+            'subtitle'    => h($item['code']) . ' — ' . h($item['name'])
+                           . '. Removes qty from a location and records an inventory transaction.',
+            'back_href'   => $backUrl,
+            'back_label'  => 'Back',
+            'actions_html' =>
+                '<button type="submit" form="main-form" class="btn btn-primary btn-sm"'
+              . ' data-shortcut="S" accesskey="s">' . shortcut_label('Save', 'S') . '</button>'
+              . ' <a class="btn btn-ghost btn-sm" href="' . h($backUrl) . '"'
+              . ' data-shortcut="C" accesskey="c">' . shortcut_label('Cancel', 'C') . '</a>',
+        ]) ?>
+        <form id="main-form" method="post" action="<?= h(url('/inventory.php?action=take_out_save')) ?>"
+              class="form-page-body form-grid">
+            <?= csrf_field() ?>
+            <input type="hidden" name="item_id" value="<?= (int)$itemId ?>">
+            <input type="hidden" name="ret" value="<?= h($ret) ?>">
+            <input type="hidden" name="ret_id" value="<?= (int)$retId ?>">
+
+            <div class="field span-2">
+                <label>Item</label>
+                <div><code><?= h($item['code']) ?></code> — <?= h($item['name']) ?></div>
+            </div>
+            <div class="field">
+                <label for="f_loc">Location to take out from *</label>
+                <select id="f_loc" name="location_id" required tabindex="1">
+                    <option value="">— Select —</option>
+                    <?php foreach ($stockRows as $r): ?>
+                        <option value="<?= (int)$r['location_id'] ?>"
+                                <?= (int)$r['location_id'] === $preSrcLocId ? 'selected' : '' ?>>
+                            <?= h($r['name']) ?> (<?= h($r['code']) ?>) · <?= rtrim(rtrim(number_format((float)$r['qty'], 3), '0'), '.') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <?php if (!$stockRows): ?>
+                    <span class="muted small">This item has no stock at any location.</span>
+                <?php else: ?>
+                    <span class="muted small">Only locations holding this item are listed.</span>
+                <?php endif; ?>
+            </div>
+            <div class="field">
+                <label for="f_qty">Quantity to take out *</label>
+                <input id="f_qty" name="qty" type="number" step="0.001" min="0.001" required tabindex="2">
+                <span id="f_qty_hint" class="muted small"></span>
+            </div>
+            <div class="field">
+                <label for="f_date">Date *</label>
+                <input id="f_date" name="txn_date" type="date" required tabindex="3" value="<?= h(date('Y-m-d')) ?>">
+            </div>
+            <div class="field">
+                <label for="f_ref">Reference doc</label>
+                <input id="f_ref" name="ref_doc" type="text" tabindex="4" placeholder="WO#, reason…">
+            </div>
+            <div class="field span-2">
+                <label for="f_notes">Notes</label>
+                <input id="f_notes" name="notes" type="text" tabindex="5">
+            </div>
+        </form>
+    </div>
+
+    <script>
+    (function () {
+        var stock = <?= json_encode($stockMap) ?>;
+        var selL = document.getElementById('f_loc');
+        var qty  = document.getElementById('f_qty');
+        var hint = document.getElementById('f_qty_hint');
+        function refreshHint() {
+            var locId = parseInt(selL.value || '0', 10);
+            if (!locId) { hint.textContent = ''; qty.removeAttribute('max'); return; }
+            var have = stock[locId] || 0;
+            qty.max = have;
+            hint.textContent = 'Available at location: ' + have.toFixed(3);
+        }
+        selL.addEventListener('change', refreshHint);
+        refreshHint();
+    })();
+    </script>
+    <?php require dirname(__DIR__, 2) . '/includes/footer.php'; exit;
+}
+
+// ============================================================
 // receive / issue / adjust — shared form
 // ============================================================
 if (in_array($action, ['receive', 'issue', 'adjust'], true)) {

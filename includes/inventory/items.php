@@ -974,6 +974,14 @@ if ($action === 'items') {
                 . (!empty($i['s_location_id']) ? '&src_location_id=' . (int)$i['s_location_id'] : ''));
             $actions .= '<a class="btn btn-icon" href="' . h($moveUrl)
                       . '" title="Move stock between locations" aria-label="Move">⇄ <span class="dt-action-label">Move</span></a> ';
+            // Take out — remove qty of this item from a location (a scoped
+            // "issue"). Pre-fills the row's own location as the source when
+            // this row carries stock, so the operator doesn't have to re-pick.
+            $takeOutUrl = url('/inventory.php?action=take_out&item_id=' . (int)$i['id']
+                . (!empty($i['s_location_id']) ? '&src_location_id=' . (int)$i['s_location_id'] : '')
+                . '&ret=items');
+            $actions .= '<a class="btn btn-icon" href="' . h($takeOutUrl)
+                      . '" title="Take out stock from a location" aria-label="Take out">⏏ <span class="dt-action-label">Take out</span></a> ';
         }
         // BOM designer is available for every item. When the item has no
         // children yet we surface a distinct accented "+ Create BOM" icon

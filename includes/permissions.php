@@ -155,6 +155,11 @@ function visible_modules()
         'inspection.view'         => ['insp_new', 'insp_completed', 'insp_templates'],
         'tools.view'              => ['tools_bubble', 'tools_cad', 'tools_weight', 'tools_calc'],
         'inventory_shiprcpt.view' => ['inventory_shipments_list'],
+        // SO Pending List / Card are nav-only pages under Job Order. They have
+        // no permission rows of their own — anyone who can see Job Cards OR ATS
+        // sees them, and both pages gate on the same two permissions.
+        'job_card.view'           => ['so_pending', 'so_pending_card'],
+        'ats.view'                => ['so_pending', 'so_pending_card'],
     ];
     foreach ($navInherit as $parentPerm => $childCodes) {
         if (in_array($parentPerm, $perms, true)) {

@@ -118,13 +118,20 @@ function invoice_picker_options()
     // adding any synthetic prefix marker. Inv items come first because
     // they're the more common pick on a typical bill.
     $opts = [];
+    // UOM comes from the uom_id -> inv_uom.code join (the authoritative
+    // source the item form writes). The bare inv_items.uom string is a
+    // legacy column that item edits no longer maintain, so it's stale
+    // ('pcs') for nearly every item; reading it here made the auto-fill
+    // pick the wrong unit. COALESCE keeps a fallback for the (currently
+    // non-existent) rows with a NULL uom_id.
     $rows = db_all(
-        'SELECT code,
-                CONCAT(code, " — ", COALESCE(NULLIF(short_description, ""), name)) AS label,
-                uom, unit_cost
-           FROM inv_items
-          WHERE is_active = 1
-          ORDER BY code
+        'SELECT i.code,
+                CONCAT(i.code, " — ", COALESCE(NULLIF(i.short_description, ""), i.name)) AS label,
+                COALESCE(u.code, i.uom) AS uom, i.unit_cost
+           FROM inv_items i
+      LEFT JOIN inv_uom u ON u.id = i.uom_id
+          WHERE i.is_active = 1
+          ORDER BY i.code
           LIMIT 2000'
     );
     foreach ($rows as $r) {
@@ -1827,6 +1834,10 @@ if ($action === 'links') {
     // We resolve "unlinked on txn" via the helper rather than a single
     // big SQL — readability over peak performance; n_items × small
     // is fine since invoices rarely exceed a few dozen lines.
+    // Receipts parked in LOC-LIP (Lost In Process) are held / non-invoiceable
+    // stock — exclude them from the picker so they can never be offered as a
+    // link candidate. 0 when LIP isn't seeded (the guard below no-ops).
+    $lipLocId = invoice_link_lip_location_id();
     $candidates = [];
     foreach ($items as $it) {
         $iid = (int)$it['id'];
@@ -1858,9 +1869,10 @@ if ($action === 'links') {
                   WHERE i.code = ?
                     AND r.qty_received > 0
                     AND COALESCE(s.is_rework, 0) = 0
+                    AND (? = 0 OR r.dst_location_id <> ?)
                   ORDER BY r.receipt_date DESC, r.id DESC
                   LIMIT 200",
-                [$it['item_code']]
+                [$it['item_code'], $lipLocId, $lipLocId]
             );
             foreach ($rows as &$r) {
                 $r['unlinked'] = invoice_link_txn_qty_unlinked('inv', (int)$r['txn_id']);

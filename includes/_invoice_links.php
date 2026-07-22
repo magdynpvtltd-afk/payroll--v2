@@ -56,6 +56,47 @@ if (!function_exists('invoice_item_resolve_txn_code')) {
     }
 }
 
+if (!function_exists('invoice_link_lip_location_id')) {
+    /**
+     * id of the LOC-LIP (Lost In Process) held location, or 0 if this
+     * install has not seeded it. Cached per request. Stock received into
+     * this bucket is "lost in process" — held, not available for
+     * consumption, and NOT invoiceable: such receipts are hidden from the
+     * link picker and rejected by invoice_item_validate_link().
+     */
+    function invoice_link_lip_location_id()
+    {
+        static $id = null;
+        if ($id === null) {
+            $id = (int)db_val(
+                "SELECT id FROM locations
+                  WHERE code COLLATE utf8mb4_unicode_ci = 'LOC-LIP'
+                  LIMIT 1",
+                [], 0
+            );
+        }
+        return $id;
+    }
+}
+
+if (!function_exists('invoice_link_receipt_is_lip')) {
+    /**
+     * True when an inv_receipt landed in the LOC-LIP (Lost In Process)
+     * held bucket — such receipts are non-invoiceable and must never be
+     * linked. Returns false when LIP isn't seeded (nothing to exclude).
+     */
+    function invoice_link_receipt_is_lip($receiptId)
+    {
+        $lip = invoice_link_lip_location_id();
+        if ($lip <= 0) return false;
+        $dst = (int)db_val(
+            'SELECT dst_location_id FROM inv_receipts WHERE id = ?',
+            [(int)$receiptId], 0
+        );
+        return $dst === $lip;
+    }
+}
+
 if (!function_exists('invoice_item_validate_link')) {
     /**
      * Verify a proposed link is legal. Throws RuntimeException with a
@@ -110,6 +151,17 @@ if (!function_exists('invoice_item_validate_link')) {
               . 'Linking is restricted to exact code matches.',
                 $item['item_code'], $txnCode
             ));
+        }
+
+        // LIP receipts are held / lost-in-process stock and are never
+        // invoiceable — refuse to link even when the code matches. The link
+        // picker already hides these, so this is the defence-in-depth guard
+        // against a hand-posted target_id.
+        if ($linkKind === 'inv' && invoice_link_receipt_is_lip($targetId)) {
+            throw new RuntimeException(
+                'This receipt was received into Lost In Process (LOC-LIP) and cannot be linked to '
+              . 'an invoice. LIP stock is held and non-invoiceable.'
+            );
         }
 
         // Remaining-qty checks. We compute both:

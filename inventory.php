@@ -77,6 +77,7 @@ $itemActions = [
 $txnActions = [
     'ledger', 'process', 'txn_save', 'txn_process', 'txn_history',
     'move', 'move_save',
+    'take_out', 'take_out_save',
     'inv_txn_import_preview', 'inv_txn_import_commit',
 ];
 $bomLineActions = [

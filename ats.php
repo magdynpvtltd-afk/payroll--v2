@@ -231,6 +231,7 @@ function ats_render_list($uid)
             ['key'=>'status',         'label'=>'Status',     'sortable'=>true,  'searchable'=>false, 'sql_col'=>'a.status'],
             ['key'=>'billing_ats_no', 'label'=>'Billing ATS','sortable'=>true,  'searchable'=>true,  'sql_col'=>'a.billing_ats_no'],
             ['key'=>'last_push_at',   'label'=>'Last push',  'sortable'=>true,  'searchable'=>false, 'sql_col'=>'a.last_push_at'],
+            ['key'=>'_actions',       'label'=>'Actions',    'sortable'=>false, 'searchable'=>false, 'th_class'=>'r', 'td_class'=>'r nowrap'],
         ],
         'default_sort' => ['ats_no', 'desc'],
     ];
@@ -238,7 +239,20 @@ function ats_render_list($uid)
         $dtCfg['extra_where'] = [['a.status = ?', $statusFilter]];
     }
 
-    $rowRenderer = function ($r) use ($labels) {
+    // Per-row action-menu gating. Computed once here (not per row) and
+    // passed into the renderer via use(). Mirrors ats_render_view() so the
+    // list's options button offers exactly the operations valid right now:
+    //   View   — always (page already requires ats.view)
+    //   Edit   — ats.edit and not locked
+    //   Send   — ats.finalize, status=draft, billing configured
+    //   Resend — ats.finalize, status=pushed, billing configured
+    //   Cancel — ats.cancel, status draft/pushed (local-only when never pushed)
+    $canEditAts   = function_exists('permission_check') && permission_check('ats', 'edit');
+    $canFinalize  = function_exists('permission_check') && permission_check('ats', 'finalize');
+    $canCancel    = function_exists('permission_check') && permission_check('ats', 'cancel');
+    $billingReady = ats_billing_config() !== null;
+
+    $rowRenderer = function ($r) use ($labels, $canEditAts, $canFinalize, $canCancel, $billingReady) {
         $lbl = $labels[$r['status']] ?? [$r['status'], 'pill-muted'];
         // Distinguish local-only cancel (never pushed) from a billing
         // cancel so the audit trail and remediation path are visible
@@ -262,6 +276,57 @@ function ats_render_list($uid)
             }
         }
 
+        // ----- Options button (⚙ dropdown) -----
+        // POST actions carry a CSRF token and a confirm() prompt, exactly
+        // like the buttons on ats_render_view(). Send/Resend hit the same
+        // finalize endpoint (idempotent on the billing side) — only the
+        // label differs, driven by the current status.
+        $aid    = (int)$r['id'];
+        $atsNo  = (string)$r['ats_no'];
+        $status = (string)$r['status'];
+
+        $actions = '<a class="btn btn-icon" title="View" aria-label="View ATS" href="'
+                 . h(url('/ats.php?action=view&id=' . $aid)) . '">👁 <span class="dt-action-label">View</span></a>';
+
+        if ($canEditAts && $status !== 'locked') {
+            $actions .= '<a class="btn btn-icon" title="Edit" aria-label="Edit ATS" href="'
+                      . h(url('/ats.php?action=edit&id=' . $aid)) . '">✎ <span class="dt-action-label">Edit</span></a>';
+        }
+
+        if ($canFinalize && $billingReady && $status === 'draft') {
+            $actions .= '<form method="post" style="display:inline" action="' . h(url('/ats.php?action=finalize&id=' . $aid)) . '"'
+                      . ' onsubmit="return confirm(\'Push ATS ' . h(addslashes($atsNo)) . ' to the billing app?\');">'
+                      . csrf_field()
+                      . '<button type="submit" class="btn btn-icon" title="Send to billing" aria-label="Send to billing">↑ <span class="dt-action-label">Send to billing</span></button></form>';
+        } elseif ($canFinalize && $billingReady && $status === 'pushed') {
+            $actions .= '<form method="post" style="display:inline" action="' . h(url('/ats.php?action=finalize&id=' . $aid)) . '"'
+                      . ' onsubmit="return confirm(\'Resend ATS ' . h(addslashes($atsNo)) . ' to billing? Safe — the billing app is idempotent on this ATS id.\');">'
+                      . csrf_field()
+                      . '<button type="submit" class="btn btn-icon" title="Resend to billing" aria-label="Resend to billing">↻ <span class="dt-action-label">Resend to billing</span></button></form>';
+        }
+
+        // Cancel billing — local-only when the ATS was never pushed, else a
+        // billing op=cancel call. Same mode logic as the view page.
+        $cancelMode = null;
+        if ($canCancel) {
+            if ($status === 'draft' && empty($r['billing_ats_id'])) {
+                $cancelMode = 'local';
+            } elseif (in_array($status, ['draft', 'pushed'], true)) {
+                $cancelMode = 'billing';
+            }
+        }
+        if ($cancelMode === 'local') {
+            $actions .= '<form method="post" style="display:inline" action="' . h(url('/ats.php?action=cancel&id=' . $aid)) . '"'
+                      . ' onsubmit="return confirm(\'Cancel ATS ' . h(addslashes($atsNo)) . ' locally? It was never pushed to billing — no network call is made. You can reopen it later.\');">'
+                      . csrf_field()
+                      . '<button type="submit" class="btn btn-icon btn-danger" title="Cancel locally (never pushed)" aria-label="Cancel billing">✕ <span class="dt-action-label">Cancel billing</span></button></form>';
+        } elseif ($cancelMode === 'billing') {
+            $actions .= '<form method="post" style="display:inline" action="' . h(url('/ats.php?action=cancel&id=' . $aid)) . '"'
+                      . ' onsubmit="return confirm(\'Cancel ATS ' . h(addslashes($atsNo)) . ' on billing? This calls billing op=cancel. Refused once billing has invoiced/shipped.\');">'
+                      . csrf_field()
+                      . '<button type="submit" class="btn btn-icon btn-danger" title="Cancel on billing" aria-label="Cancel billing">✕ <span class="dt-action-label">Cancel billing</span></button></form>';
+        }
+
         return [
             'ats_no'         => '<a href="' . h(url('/ats.php?action=view&id=' . (int)$r['id'])) . '"><strong>' . h($r['ats_no']) . '</strong></a>',
             'po_no'          => h($r['po_no']),
@@ -272,6 +337,7 @@ function ats_render_list($uid)
                                   ? h($r['billing_ats_no'])
                                   : '<span class="muted small">—</span>',
             'last_push_at'   => $pushCell,
+            '_actions'       => dt_actions_wrap($actions),
         ];
     };
 

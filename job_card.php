@@ -626,10 +626,31 @@ if ($action === 'save_ats') {
         redirect(url('/job_card.php?action=view&id=' . $id));
     }
 
-    // ATS number is no longer operator-entered — it's auto-assigned by
-    // ats_create_for_job_card via code_next('ats'). This handler now
-    // just commits the step (moves stock to SHP on first save) and
-    // triggers the ATS create/refresh. The form has no ats_no input.
+    // ATS number:
+    //   - When QC flagged "ATS needed" = Yes, the operator may type a
+    //     custom ATS number (any characters). Blank means "auto-assign".
+    //   - Otherwise the number is always auto-assigned via code_next('ats')
+    //     inside ats_create_for_job_card — any submitted ats_no is ignored.
+    // We uniqueness-check a supplied number up front so we can bounce the
+    // operator back with a friendly message; ats_create_for_job_card also
+    // re-checks inside the transaction as a race backstop.
+    $customAtsNo = null;
+    if ($jc['ats_needed'] === 'Yes') {
+        $customAtsNo = trim((string)input('ats_no', ''));
+        if ($customAtsNo !== '') {
+            $ownAts   = ats_find_by_job_card((int)$jc['id']);
+            $ownAtsId = $ownAts ? (int)$ownAts['id'] : 0;
+            if (ats_no_in_use($customAtsNo, $ownAtsId)) {
+                flash_set('error', sprintf(
+                    'ATS number "%s" is already in use by another ATS. Enter a unique number.',
+                    $customAtsNo
+                ));
+                redirect(url('/job_card.php?action=view&id=' . $id));
+            }
+        } else {
+            $customAtsNo = null; // blank → auto-assign / keep existing
+        }
+    }
 
     $isFirstSave = empty($jc['ats_completed_at']);
     $newStatus = $jc['status'];
@@ -642,8 +663,11 @@ if ($action === 'save_ats') {
 
         // Create / refresh the ATS first so we know the number to mirror
         // into job_cards.ats_no for display. Inside the same transaction
-        // so a failure here rolls back the whole save.
-        $atsId = ats_create_for_job_card($jc, current_user_id());
+        // so a failure here rolls back the whole save. $customAtsNo is
+        // non-null only when QC flagged "ATS needed" = Yes and the
+        // operator typed a number; it's used verbatim (fresh) or renames
+        // the existing ATS.
+        $atsId = ats_create_for_job_card($jc, current_user_id(), $customAtsNo);
         $atsRow = ats_find($atsId);
         $atsNo = $atsRow ? (string)$atsRow['ats_no'] : '';
 
@@ -791,6 +815,97 @@ if ($action === 'mark_all_read') {
 }
 
 // ============================================================
+// DELETE — admin-only hard delete of a job card
+// ============================================================
+// Admins can remove a job card entirely (e.g. test data or a card
+// created by mistake). This is a genuine DELETE — for the normal
+// workflow-terminal state use the ATS "cancel" path instead. Gated on
+// is_admin() (the hard-override role), not a functional permission, so
+// it stays admin-only regardless of what other roles are granted.
+//
+// The linked ATS (if any) is deleted along with the card — its lines go
+// too, and ats_push_history cascades on the ATS delete.
+//
+// Guard — we refuse rather than orphan downstream state:
+//   * Child job cards split off from this one still point here. Delete
+//     or reassign those first so the split lineage stays consistent.
+//
+// NOTE: a hard delete does NOT call the billing system. If the ATS was
+// already pushed, its billing-side record is left untouched — cancel it
+// in billing separately if that matters.
+if ($action === 'delete') {
+    csrf_check();
+    if (!is_admin()) {
+        flash_set('error', 'Only administrators can delete job cards.');
+        redirect(url('/job_card.php'));
+    }
+    $id = (int)input('id', 0);
+    $jc = db_one("SELECT * FROM job_cards WHERE id = ?", [$id]);
+    if (!$jc) {
+        flash_set('error', 'Job card not found.');
+        redirect(url('/job_card.php'));
+    }
+
+    // Guard 1 — child cards from a partial split.
+    $childCount = (int)db_val("SELECT COUNT(*) FROM job_cards WHERE parent_id = ?", [$id], 0);
+    if ($childCount > 0) {
+        flash_set('error', sprintf(
+            'Cannot delete %s — %d child job card(s) were split from it. Delete or reassign those first.',
+            $jc['jc_no'], $childCount
+        ));
+        redirect(url('/job_card.php'));
+    }
+
+    // Linked ATS (1:1) — deleted along with the card, whatever its status.
+    $ats = ats_find_by_job_card($id);
+
+    try {
+        db()->beginTransaction();
+
+        // Remove the linked ATS and its lines. ats_push_history cascades
+        // on the ATS delete (fk_aph_ats ON DELETE CASCADE).
+        if ($ats) {
+            db_exec("DELETE FROM ats_lines WHERE ats_id = ?", [(int)$ats['id']]);
+            db_exec("DELETE FROM ats WHERE id = ?", [(int)$ats['id']]);
+        }
+        // Any stray ATS lines that referenced this card directly.
+        db_exec("DELETE FROM ats_lines WHERE job_card_id = ?", [$id]);
+
+        // Child rows that have no FK cascade of their own.
+        db_exec("DELETE FROM job_card_boxes WHERE job_card_id = ?", [$id]);
+        db_exec("DELETE FROM job_card_events WHERE job_card_id = ?", [$id]);
+        db_exec("DELETE FROM notifications WHERE entity_type = 'job_card' AND entity_id = ?", [$id]);
+
+        // Detach any inspection that pointed at this card (column may be
+        // absent on older installs — ignore if so).
+        try {
+            db_exec("UPDATE inspections SET job_card_id = NULL WHERE job_card_id = ?", [$id]);
+        } catch (\Throwable $e) { /* inspections.job_card_id not present */ }
+
+        db_exec("DELETE FROM job_cards WHERE id = ?", [$id]);
+
+        $auditDetails = 'deleted job card ' . $jc['jc_no'] . ' (status ' . $jc['status'] . ')';
+        if ($ats) $auditDetails .= ' + ATS ' . $ats['ats_no'];
+        db_exec(
+            "INSERT INTO audit_log (actor_id, target_id, action, details) VALUES (?, ?, 'job_card.delete', ?)",
+            [real_user_id(), $id, $auditDetails]
+        );
+
+        db()->commit();
+    } catch (\Throwable $e) {
+        if (db()->inTransaction()) db()->rollBack();
+        error_log('[job_card/delete] db error: ' . $e->getMessage());
+        flash_set('error', 'Could not delete job card: ' . $e->getMessage());
+        redirect(url('/job_card.php'));
+    }
+
+    flash_set('success', $ats
+        ? sprintf('Job card %s and its ATS %s deleted.', $jc['jc_no'], $ats['ats_no'])
+        : sprintf('Job card %s deleted.', $jc['jc_no']));
+    redirect(url('/job_card.php'));
+}
+
+// ============================================================
 // LIST
 // ============================================================
 if ($action === 'list') {
@@ -826,7 +941,11 @@ if ($action === 'list') {
         'default_sort' => ['created_at', 'desc'],
     ];
 
-    $rowRenderer = function ($r) {
+    // Admin-only: reveal a per-row Delete action in the list. Gated on the
+    // hard-override 'admin' role so it never appears for other roles.
+    $isAdmin = is_admin();
+
+    $rowRenderer = function ($r) use ($isAdmin) {
         $itemLabel = $r['item_code']
             ? '(' . h($r['item_code']) . ')-' . h($r['item_name'])
             : '<span class="muted">—</span>';
@@ -835,6 +954,14 @@ if ($action === 'list') {
             : '<span class="muted">—</span>';
         $action = '<a class="btn btn-icon" href="' . h(url('/job_card.php?action=view&id=' . (int)$r['id']))
                 . '" title="View" aria-label="View job card">👁 <span class="dt-action-label">View</span></a>';
+        if ($isAdmin) {
+            $action .= '<form method="post" style="display:inline" action="'
+                     . h(url('/job_card.php?action=delete&id=' . (int)$r['id'])) . '"'
+                     . ' onsubmit="return confirm(\'Delete job card ' . h(addslashes($r['jc_no']))
+                     . '? This permanently removes the card and its linked ATS, boxes, events and notifications. This cannot be undone.\');">'
+                     . csrf_field()
+                     . '<button type="submit" class="btn btn-icon btn-danger" title="Delete job card" aria-label="Delete job card">🗑 <span class="dt-action-label">Delete</span></button></form>';
+        }
         return [
             'jc_no'         => '<strong><a href="' . h(url('/job_card.php?action=view&id=' . (int)$r['id'])) . '">' . h($r['jc_no']) . '</a></strong>',
             'status'        => jc_status_pill($r['status']),
@@ -1536,7 +1663,20 @@ if ($action === 'view') {
                         <div class="jc-grid">
                             <div class="jc-cell" style="grid-column: span 2;">
                                 <span class="jc-cell-label">ATS Number</span>
-                                <?php if ($jcAts): ?>
+                                <?php if ($jc['ats_needed'] === 'Yes'): ?>
+                                    <?php // QC flagged ATS needed — operator can set/edit a custom number. ?>
+                                    <input type="text" name="ats_no" maxlength="64"
+                                           value="<?= h($jcAts['ats_no'] ?? '') ?>"
+                                           placeholder="Leave blank to auto-assign"
+                                           autocomplete="off" style="margin-top:4px;">
+                                    <span class="jc-meta-line" style="margin-top:4px;">
+                                        Enter your own ATS number (any characters) or leave blank to auto-assign. Must be unique.
+                                        <?php if ($jcAts): ?>
+                                            Current:
+                                            <a href="<?= h(url('/ats.php?action=view&id=' . (int)$jcAts['id'])) ?>"><strong><?= h($jcAts['ats_no']) ?></strong></a>.
+                                        <?php endif; ?>
+                                    </span>
+                                <?php elseif ($jcAts): ?>
                                     <span class="jc-cell-value">
                                         <a href="<?= h(url('/ats.php?action=view&id=' . (int)$jcAts['id'])) ?>"><strong><?= h($jcAts['ats_no']) ?></strong></a>
                                         <span class="muted small">(auto-assigned)</span>
@@ -1557,10 +1697,17 @@ if ($action === 'view') {
                             </div>
                         </div>
                         <p class="muted small" style="margin: 8px 0 0;">
+                            <?php $atsCustom = ($jc['ats_needed'] === 'Yes'); ?>
                             <?php if (empty($jc['ats_completed_at'])): ?>
-                                On first save, <strong><?= jc_num($jc['sub_qty']) ?></strong> units will move to the SHP location and an ATS number will be auto-assigned.
+                                On first save, <strong><?= jc_num($jc['sub_qty']) ?></strong> units will move to the SHP location and
+                                <?= $atsCustom
+                                    ? 'the ATS number above will be recorded (auto-assigned if left blank).'
+                                    : 'an ATS number will be auto-assigned.' ?>
                             <?php else: ?>
-                                Stock has already moved to SHP. The ATS number was auto-assigned on first save.
+                                Stock has already moved to SHP.
+                                <?= $atsCustom
+                                    ? 'You can change the ATS number above; it must stay unique.'
+                                    : 'The ATS number was auto-assigned on first save.' ?>
                             <?php endif; ?>
                         </p>
                         <div style="margin-top:14px; display:flex; gap:8px; align-items:center;">
