@@ -88,6 +88,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post_exceeded_limit()) {
 
 $val = fn($k, $d = '') => e($_POST[$k] ?? ($task[$k] ?? $d));
 
+// For a brand-new task (not an edit, not a re-render after a validation error),
+// default "Assign to" to whoever this user assigned their previous task to —
+// most creators assign to the same person again and again. If that account has
+// since been disabled it won't be in $people, so the option simply won't render
+// and the field falls back to Unassigned.
+$defaultAssignee = null;
+if (!$task && $_SERVER['REQUEST_METHOD'] !== 'POST') {
+    $lastStmt = db()->prepare(
+        'SELECT assigned_to FROM tf_tasks
+          WHERE created_by = ? AND assigned_to IS NOT NULL
+          ORDER BY id DESC LIMIT 1'
+    );
+    $lastStmt->execute([(int)$me['id']]);
+    $prev = $lastStmt->fetchColumn();
+    if ($prev !== false) $defaultAssignee = (int)$prev;
+}
+
 // Wear MagDyn's chrome — sidebar nav + script tail — instead of TaskFlow's own
 // topbar/tabbar. The bridge sets every header/footer hook this page needs and
 // pulls in MagDyn's bootstrap; we only add this page's title and <head> scripts.
@@ -132,7 +149,8 @@ require MAGDYN_INCLUDES . '/header.php';
         <option value="">— Unassigned —</option>
         <?php foreach ($people as $p):
             $sel = (string)($task['assigned_to'] ?? '') === (string)$p['id']
-                || (string)($_POST['assigned_to'] ?? '') === (string)$p['id']; ?>
+                || (string)($_POST['assigned_to'] ?? '') === (string)$p['id']
+                || ($defaultAssignee !== null && $defaultAssignee === (int)$p['id']); ?>
           <option value="<?= $p['id'] ?>" <?= $sel ? 'selected' : '' ?>>
             <?= e($p['name']) ?><?= (int)$p['id'] === (int)$me['id'] ? ' (me)' : '' ?>
           </option>

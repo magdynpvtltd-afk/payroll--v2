@@ -7,6 +7,7 @@
  *  the mirror-image guard. */
 require __DIR__ . '/db.php';
 require __DIR__ . '/task_query.php';
+require __DIR__ . '/uploads.php';
 $me = require_login();
 
 $filter = $_GET['filter'] ?? 'mine';   // mine | created | unassigned | unread | all
@@ -19,6 +20,9 @@ $admin  = $me['role'] === 'admin';
 if ($filter === 'unassigned' && !$admin) { $filter = 'mine'; }
 
 $tasks = tf_task_list($me, $filter, $status, $admin);
+// Attachments for every listed task, so the 📎 badge can open them in place
+// (see tf_att_trigger() / tf_attachment_list_assets()).
+$attMap = tf_list_attachments(array_column($tasks, 'id'));
 
 $pill = fn($f, $lbl) => '<a class="pill ' . ($filter === $f ? 'on' : '') . '" href="?filter=' . $f
     . ($status ? '&status=' . e($status) : '') . '">' . $lbl . '</a>';
@@ -90,7 +94,7 @@ require __DIR__ . '/header.php';
       <?php endif; ?>
       <?php if ($t['created_at']): ?> · assigned <?= e(tf_fmt_date($t['created_at'])) ?><?php endif; ?>
       <?php if ($t['due_date']): ?> · due <?= e($t['due_date']) ?><?php endif; ?>
-      <?php if ($t['attach_count']): ?> · 📎 <?= (int)$t['attach_count'] ?><?php endif; ?>
+      <?php if ($t['attach_count']): ?> · <?= tf_att_trigger($attMap[(int)$t['id']] ?? []) ?><?php endif; ?>
     </div>
     <?php if ($t['last_comment'] !== null && $t['last_comment'] !== ''): ?>
       <div class="last-comment small">💬 <span class="muted"><?= e(tf_excerpt($t['last_comment'], 40)) ?></span></div>
@@ -98,4 +102,5 @@ require __DIR__ . '/header.php';
   </a>
 <?php endforeach; ?>
 </div>
+<?php tf_attachment_list_assets(); ?>
 <?php require __DIR__ . '/footer.php';

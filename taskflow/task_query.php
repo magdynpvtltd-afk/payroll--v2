@@ -92,6 +92,38 @@ function tf_task_list(array $me, string $filter, string $status, bool $admin): a
 }
 
 /**
+ * Attachments for a set of tasks, keyed by task id — powers the list-page
+ * "view files without opening the task" popover (see tf_att_trigger() /
+ * tf_attachment_list_assets() in uploads.php). One query for the whole page.
+ *
+ * Returns [ taskId => [ ['id'=>int, 'name'=>string, 'img'=>bool], … ], … ].
+ * `img` lets the popover show 🖼 vs 📄; the actual preview is decided from the
+ * filename extension by the shared modal, so this is display sugar only.
+ */
+function tf_list_attachments(array $taskIds): array
+{
+    $out = [];
+    // Ints only — the values are cast before they touch the SQL, so the
+    // IN(...) list is built by hand safely without a placeholder per id.
+    $ids = array_values(array_unique(array_filter(array_map('intval', $taskIds))));
+    if (!$ids) return $out;
+    $rows = db()->query(
+        'SELECT id, task_id, original_name, mime_type
+           FROM tf_attachments
+          WHERE task_id IN (' . implode(',', $ids) . ')
+          ORDER BY id'
+    );
+    foreach ($rows as $a) {
+        $out[(int)$a['task_id']][] = [
+            'id'   => (int)$a['id'],
+            'name' => (string)$a['original_name'],
+            'img'  => str_starts_with((string)$a['mime_type'], 'image/'),
+        ];
+    }
+    return $out;
+}
+
+/**
  * Mark every current comment on a task as read for a user (upsert the highest
  * comment id into tf_task_reads). Called when the user opens the task. Best-
  * effort: a missing table / DB hiccup must never break viewing a task.

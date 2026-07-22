@@ -24,6 +24,7 @@
  */
 require __DIR__ . '/db.php';
 require __DIR__ . '/task_query.php';
+require __DIR__ . '/uploads.php';
 $me = require_login();
 
 $filter = $_GET['filter'] ?? 'mine';   // mine | created | unassigned | unread | all
@@ -35,6 +36,9 @@ $admin  = $me['role'] === 'admin';
 if ($filter === 'unassigned' && !$admin) { $filter = 'mine'; }
 
 $tasks = tf_task_list($me, $filter, $status, $admin);
+// Attachments for every listed task, so the 📎 badge in the Activity column
+// can open them in place (see tf_att_trigger() / tf_attachment_list_assets()).
+$attMap = tf_list_attachments(array_column($tasks, 'id'));
 
 $pill = fn($f, $lbl) => '<a class="pill ' . ($filter === $f ? 'on' : '') . '" href="?filter=' . $f
     . ($status ? '&status=' . e($status) : '') . '">' . $lbl . '</a>';
@@ -222,7 +226,7 @@ require MAGDYN_INCLUDES . '/header.php';
           <td class="tfdt-activity" data-sort="<?= $unread ?>">
             <?php if ($t['comment_count']): ?><span title="Comments">💬 <?= (int)$t['comment_count'] ?></span><?php endif; ?>
             <?php if ($unread > 0): ?><span class="unread-badge" title="<?= $unread ?> unread comment(s)"><?= $unread ?></span><?php endif; ?>
-            <?php if ($t['attach_count']): ?><span title="Attachments">📎 <?= (int)$t['attach_count'] ?></span><?php endif; ?>
+            <?php if ($t['attach_count']): ?><?= tf_att_trigger($attMap[(int)$t['id']] ?? []) ?><?php endif; ?>
           </td>
           <td>
             <?php if ($t['last_comment'] !== null && $t['last_comment'] !== ''): ?>
@@ -618,6 +622,10 @@ require MAGDYN_INCLUDES . '/header.php';
   // ---- row click-through (ignore clicks on the title link itself) ----
   tbody.addEventListener('click', function (ev) {
     if (ev.target.closest('a')) return;
+    // The 📎 attachment badge opens its own popover — never navigate the row
+    // out from under it. (Its handler stopPropagation()s too, but that fires
+    // AFTER this bubbling listener, so the badge must be excluded here.)
+    if (ev.target.closest('.tf-att-trigger')) return;
     var tr = ev.target.closest('tr.tfdt-row');
     if (tr && tr.dataset.href) window.location.href = tr.dataset.href;
   });
@@ -732,4 +740,5 @@ require MAGDYN_INCLUDES . '/header.php';
   }
 })();
 </script>
+<?php tf_attachment_list_assets(); ?>
 <?php require MAGDYN_INCLUDES . '/footer.php';

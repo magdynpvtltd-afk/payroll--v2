@@ -131,6 +131,18 @@ fieldset{border:1px solid var(--line);border-radius:10px;padding:.7rem;margin:.4
 .auth{max-width:420px;margin:2rem auto}
 .auth-logo{display:block;width:170px;max-width:60%;height:auto;margin:.2rem auto 1.1rem}
 
+/* On the desktop chrome pages, MagDyn's combobox.js (assets/js/combobox.js)
+   upgrades each <select> into a searchable text input and keeps the original
+   <select> in the DOM as the form control. app.css hides that select with
+   opacity:0 — but an opacity:0 control is still FOCUSABLE, so it lingers as a
+   phantom Tab stop right beside the search box AND is announced to assistive
+   tech as a second, plain (no-search) dropdown for the same field. Taking it
+   fully out of layout leaves exactly one searchable control and a clean tab
+   order through the task form. `!important` because this sheet loads before
+   app.css; TaskFlow's enhanced selects are never `required`, so display:none
+   here can't suppress a validation message. */
+.cb-wrap > select.cb-native{display:none !important}
+
 /* ---- filters / pills ---- */
 .filters{display:flex;gap:.4rem;flex-wrap:wrap;margin:.4rem 0}
 .pill{background:#fff;border:1px solid var(--line);border-radius:999px;
@@ -584,3 +596,32 @@ body.has-dt-wrap .tfdt-wrap > .tfdt-scroll{
 .att-preview-body{flex:1;overflow:hidden;display:flex;background:#fff}
 .att-preview-body iframe{width:100%;height:100%;border:0;background:#fff}
 body.att-preview-modal-open{overflow:hidden}
+
+/* ============================================================
+   Attachment quick-view popover (list pages) — the 📎 badge on a
+   card / table row opens this to list the task's files without
+   leaving the list. Each file is a .tf-att-link the preview modal
+   above opens in place. See uploads.php :: tf_att_trigger() /
+   tf_attachment_list_assets().
+   ============================================================ */
+.tf-att-trigger{cursor:pointer;border-radius:6px;padding:0 .15rem;white-space:nowrap}
+.tf-att-trigger:hover{color:var(--green-d)}
+.tf-att-trigger:focus-visible{outline:2px solid var(--green);outline-offset:1px}
+/* position:fixed + JS placement (like the combobox menu) so no ancestor's
+   overflow can clip it. Below the preview modal's z-index so a picked file
+   covers it. */
+.tf-att-pop[hidden]{display:none}
+.tf-att-pop{
+  position:fixed;z-index:10000;min-width:180px;max-width:min(320px,90vw);
+  max-height:60vh;overflow:auto;padding:.35rem;
+  background:#fff;border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.18);
+}
+.tf-att-pop-list{display:flex;flex-direction:column;gap:.1rem}
+.tf-att-pop .tf-att-link{
+  display:block;padding:.4rem .5rem;border-radius:8px;
+  color:var(--ink);font-size:.85rem;font-weight:600;cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.tf-att-pop .tf-att-link:hover{background:var(--hi);color:var(--green-d)}
+.tf-att-pop-empty{padding:.4rem .5rem;color:var(--muted);font-size:.82rem}

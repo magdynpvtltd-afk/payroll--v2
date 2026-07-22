@@ -1,5 +1,9 @@
 /* TaskFlow service worker: app-shell cache + offline fallback.
    Network-first for pages so data stays fresh; cache-first for static assets. */
+// v10: list-page attachment quick-view popover + single searchable "Assign to"
+// (combobox native-select hidden) — both add rules to style.css. Assets are
+// stale-while-revalidate, so bumping re-fetches the SHELL (incl. style.css) on
+// install and pushes the new CSS to already-installed clients next visit.
 // v9: added the attachment preview modal — its styles live in style.css.
 // style.css is stale-while-revalidate, so a fresh client could paint the modal
 // unstyled for one visit; bumping re-fetches the SHELL (incl. style.css) on
@@ -9,7 +13,7 @@
 // un-stick an edit any more — but the SHELL list is re-fetched on install, so
 // bumping is what pushes the new icon out to already-installed clients on their
 // next visit instead of one visit later.
-const CACHE = 'taskflow-v9';
+const CACHE = 'taskflow-v10';
 // PHP pages link style.css / app.js with an ?v=<mtime> stamp (tf_asset), and
 // those stamped URLs cache themselves on first fetch. The bare 'style.css' here
 // is solely for offline.html, which is static and can't stamp its own link;
