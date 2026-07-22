@@ -990,6 +990,24 @@ body.spa-loading::after {
     cursor: help;
 }
 
+/* SO pending pills in the BOM grid name cell — replace the old red
+   stock-on-hand bracket. Two compact pills per part: in-production
+   pending (info/blue via .pill-info) and billing pending (amber via
+   .pill-warn). Colour comes from the .pill-* classes; this rule only
+   tunes size/spacing so they sit inline in the dense grid. Each pill
+   is suppressed server-side when its qty is zero. */
+.bom-grid .bom-so-pill {
+    margin-left: 6px;
+    padding: 0 7px;
+    font-size: 10px;
+    line-height: 17px;
+    font-weight: 600;
+    border-radius: 10px;
+    white-space: nowrap;
+    cursor: help;
+    vertical-align: middle;
+}
+
 /* Category badge in BOM grid rows — small muted chip inside the
    dedicated .bom-cat-col column. Shows the inventory category
    (Finished Goods, Sub Assembly, Raw Material, etc.).

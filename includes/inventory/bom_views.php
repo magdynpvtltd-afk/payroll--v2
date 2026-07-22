@@ -1247,6 +1247,91 @@ if ($action === 'bom_grid') {
         $tbrByItem[(int)$r['item_id']] = (float)$r['tbr_qty'];
     }
 
+    // ----------------------------------------------------------------
+    // Per-item SO pending quantities from job_cards — the same two
+    // buckets the Job Order ▸ SO Pending pages surface. We reuse
+    // so_pending_statuses() (from includes/_so_pending.php) as the
+    // single source of truth for "what is in-production pending" so
+    // this grid can't drift from those pages.
+    //
+    //   $soQtyPendingByItem[id] = in-production pending qty
+    //        (status IN qc_pending / prod_pending / ats_pending)
+    //   $soQtyBillingByItem[id] = billing-pending qty
+    //        (status = 'billing_pending' — produced, awaiting invoice)
+    //
+    // Both sum COALESCE(sub_qty, po_qty): after a partial-production
+    // split the parent keeps its full po_qty and the balance moves to a
+    // child card, so summing raw po_qty double-counts. Wrapped in
+    // try/catch so a DB without the job_cards table still renders the
+    // grid (the pills just don't appear).
+    // ----------------------------------------------------------------
+    require_once dirname(__DIR__, 2) . '/includes/_so_pending.php';
+    $soQtyPendingByItem = [];
+    $soQtyBillingByItem = [];
+    try {
+        $pendingStatuses = so_pending_statuses();   // qc_pending / prod_pending / ats_pending
+        $ph = implode(',', array_fill(0, count($pendingStatuses), '?'));
+        foreach (db_all(
+            "SELECT jc.item_id,
+                    SUM(CASE WHEN jc.status IN ($ph) THEN COALESCE(jc.sub_qty, jc.po_qty) ELSE 0 END) AS pending_qty,
+                    SUM(CASE WHEN jc.status = 'billing_pending' THEN COALESCE(jc.sub_qty, jc.po_qty) ELSE 0 END) AS billing_qty
+               FROM job_cards jc
+              WHERE jc.status IN ($ph) OR jc.status = 'billing_pending'
+           GROUP BY jc.item_id",
+            array_merge($pendingStatuses, $pendingStatuses)
+        ) as $r) {
+            $soQtyPendingByItem[(int)$r['item_id']] = (float)$r['pending_qty'];
+            $soQtyBillingByItem[(int)$r['item_id']] = (float)$r['billing_qty'];
+        }
+    } catch (\Throwable $e) {
+        $soQtyPendingByItem = [];
+        $soQtyBillingByItem = [];
+    }
+
+    // ----------------------------------------------------------------
+    // Per-item "maximum due days" of the SO pending — the ordering key.
+    // days = DATEDIFF(delivery_date, today): negative = overdue. The MIN
+    // over an item's pending job cards is its most-overdue delivery = the
+    // MAXIMUM number of days it is overdue, which is exactly the key the
+    // Job Order ▸ SO Pending list & card pages sort by (min_days in
+    // includes/_so_pending.php). We include the same status set those pages
+    // do — in-production pending PLUS billing pending — so all three views
+    // agree. Undated cards contribute NULL and are ignored, so an item with
+    // only undated (or no) pending work simply has no key.
+    // Same defensive try/catch: a DB without job_cards still renders.
+    // ----------------------------------------------------------------
+    $soMinDaysByItem = [];
+    try {
+        $wantedStatuses = array_merge(so_pending_statuses(), ['billing_pending']);
+        $phw = implode(',', array_fill(0, count($wantedStatuses), '?'));
+        foreach (db_all(
+            "SELECT jc.item_id, MIN(DATEDIFF(jc.delivery_date, CURDATE())) AS min_days
+               FROM job_cards jc
+              WHERE jc.status IN ($phw) AND jc.delivery_date IS NOT NULL
+           GROUP BY jc.item_id",
+            $wantedStatuses
+        ) as $r) {
+            $soMinDaysByItem[(int)$r['item_id']] = (int)$r['min_days'];
+        }
+    } catch (\Throwable $e) {
+        $soMinDaysByItem = [];
+    }
+
+    // Order the finished-good products by that key — most overdue first —
+    // so parts needing attention float to the top of the grid. Products
+    // with no dated pending SO fall to the bottom (PHP_INT_MAX key) and
+    // keep their original code order via the strcmp tiebreak. Only the
+    // TOP-LEVEL product order changes; children still render in BOM order
+    // beneath each product (flatten_bom_mem is unchanged).
+    if ($products) {
+        usort($products, function ($a, $b) use ($soMinDaysByItem) {
+            $ka = $soMinDaysByItem[(int)$a['id']] ?? PHP_INT_MAX;
+            $kb = $soMinDaysByItem[(int)$b['id']] ?? PHP_INT_MAX;
+            if ($ka !== $kb) return $ka <=> $kb;   // fewer days = more overdue = first
+            return strcmp((string)$a['code'], (string)$b['code']);
+        });
+    }
+
     /**
      * Format a quantity for the BOM grid numeric columns.
      * Blank when zero (so the grid stays uncluttered), 3-decimal otherwise
@@ -1539,8 +1624,23 @@ if ($action === 'bom_grid') {
                         <?php if ((int)$item['is_active'] === 0): ?>
                             <span class="pill pill-warn" style="margin-left:6px;" title="Item is marked inactive">inactive</span>
                         <?php endif; ?>
-                        <?php if ($row['depth'] === 0 && (int)$item['stock_on_hand']): ?>
-                            <span class="muted" style="color: #b00; margin-left: 6px;">(<?= (int)$item['stock_on_hand'] ?>)</span>
+                        <?php
+                            // SO pending pills — replace the old red stock-on-hand
+                            // bracket. Two buckets from job_cards: in-production
+                            // pending (blue) and billing pending (amber). Each pill
+                            // is suppressed when its qty is zero so a part with no
+                            // backlog reads clean.
+                            $iidName   = (int)$item['id'];
+                            $soPendQty = $soQtyPendingByItem[$iidName] ?? 0.0;
+                            $soBillQty = $soQtyBillingByItem[$iidName] ?? 0.0;
+                            if ($soPendQty > 0):
+                        ?>
+                            <span class="pill pill-info bom-so-pill"
+                                  title="SO quantity pending — open sales orders still in production">SO Pending: <?= bom_fmt_qty($soPendQty) ?></span>
+                        <?php endif; ?>
+                        <?php if ($soBillQty > 0): ?>
+                            <span class="pill pill-warn bom-so-pill"
+                                  title="SO quantity billing pending — produced, awaiting invoice">🧾 Billing Pending: <?= bom_fmt_qty($soBillQty) ?></span>
                         <?php endif; ?>
                     </td>
                     <?php

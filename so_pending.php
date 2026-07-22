@@ -86,41 +86,42 @@ require __DIR__ . '/includes/header.php';
     }
     .sop-tab.active { color: var(--primary, #1d4ed8); background: var(--surface); border-color: var(--border); border-bottom: 1px solid var(--surface); }
 
-    /* Per-part card */
-    .sop-item {
-        display: grid; grid-template-columns: 46px minmax(220px, 1fr) auto;
-        gap: 4px 14px; align-items: start;
-        border: 1px solid var(--border); border-radius: 8px;
-        background: var(--surface); padding: 10px 14px; margin-bottom: 8px;
-    }
-    .sop-serial { font-weight: 700; color: var(--text-muted); text-align: center; font-size: 13px; padding-top: 2px; }
-    .sop-label { font-size: 13px; color: var(--text); font-weight: 600; line-height: 1.35; word-break: break-word; }
-    .sop-total { justify-self: end; text-align: right; }
-    .sop-total .n { font-size: 17px; font-weight: 700; color: var(--text); }
-    .sop-total .l { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
-    .sop-total .bill-sub { display: inline-block; margin-top: 3px; font-size: 10.5px; font-weight: 700;
-        color: #6d28d9; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+    /* ---- Legacy-sheet pending table ----
+       One <tbody> per part, holding TWO rows: a "Days" row and a "Qty" row.
+       The first three columns (serial · name · total) rowspan both rows; the
+       delivery cells to their right are variable in count and simply leave
+       white space to the right when a part has fewer deliveries (the table is
+       content-width, not stretched). Zebra striping is per part = per tbody. */
+    .sop-tablewrap { overflow-x: auto; }
+    .sop-table { border-collapse: collapse; font-size: 12px; }
+    .sop-table td { border: 1px solid var(--border-strong, #b9bec7); padding: 3px 8px; }
 
-    /* Delivery strip spans the full width beneath the header row */
-    .sop-deliveries { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-    .sop-chip {
-        display: inline-flex; flex-direction: column; align-items: center;
-        min-width: 46px; border-radius: 6px; padding: 3px 8px; border: 1px solid var(--border);
-        background: var(--surface-alt, #f7f8fa);
-    }
-    .sop-chip .d { font-size: 11px; font-weight: 700; line-height: 1.2; }
-    .sop-chip .q { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.3; }
-    .sop-chip.overdue { background: var(--danger-bg, #fef2f2); border-color: #f6b8b8; }
-    .sop-chip.overdue .d { color: var(--danger, #dc2626); }
-    .sop-chip.today   { background: var(--warn-bg, #fffbeb); border-color: #f5e0a3; }
-    .sop-chip.today   .d { color: var(--warn, #b45309); }
-    .sop-chip.future  { background: var(--success-bg, #f0fdf4); border-color: #b7e4c7; }
-    .sop-chip.future  .d { color: var(--success, #16a34a); }
-    /* Billing pending = produced, awaiting invoice. Violet, and it OVERRIDES
-       the day-based colour so it's unmistakable from in-production chips. */
-    .sop-chip.billing { background: #f5f3ff; border-color: #c4b5fd; }
-    .sop-chip.billing .d { color: #6d28d9; }
-    .sop-chip .bill { font-size: 8.5px; font-weight: 800; letter-spacing: .04em; color: #6d28d9; line-height: 1; margin-bottom: 1px; }
+    .sop-item { background: var(--surface, #fff); }
+    .sop-item:nth-of-type(even) { background: var(--surface-alt, #eef0f3); }
+
+    .sop-serial { width: 34px; text-align: center; font-weight: 700; color: var(--text); vertical-align: middle; }
+    .sop-name   { width: 360px; max-width: 360px; font-weight: 600; color: var(--primary, #16447a);
+                  line-height: 1.3; word-break: break-word; vertical-align: middle; }
+    .sop-total  { width: 46px; text-align: center; vertical-align: middle; }
+    .sop-total .n { font-weight: 700; font-size: 14px; color: var(--text); }
+    .sop-total .bill-sub { display: block; margin-top: 2px; font-size: 9px; font-weight: 700; color: #6d28d9; white-space: nowrap; }
+
+    /* Row-label cells ("Days" / "Qty") — light blue, like the legacy sheet. */
+    .sop-rl { background: #dbe6f3; font-weight: 700; text-align: left; white-space: nowrap; width: 40px; color: #1f3350; }
+
+    /* Delivery value cells */
+    .sop-day { text-align: center; font-weight: 700; min-width: 34px; }
+    .sop-qty { text-align: center; color: var(--text); min-width: 34px; }
+
+    /* Existing colour-differentiating logic, applied to the Days number:
+       overdue = red, due-today = amber, future = green, no-date = muted,
+       and billing pending (produced, awaiting invoice) = violet + violet tint. */
+    .sop-day.overdue { color: var(--danger, #cc0000); }
+    .sop-day.today   { color: var(--warn, #b45309); }
+    .sop-day.future  { color: var(--success, #16a34a); }
+    .sop-day.nodate  { color: var(--text-muted, #888); }
+    .sop-day.billing, .sop-qty.billing { background: #f5f3ff; }
+    .sop-day.billing { color: #6d28d9; }
 
     .sop-empty { color: var(--text-muted); padding: 30px; text-align: center; font-style: italic; }
     .sop-no-match { display: none; color: var(--text-muted); padding: 24px; text-align: center; font-style: italic; }
@@ -173,48 +174,52 @@ require __DIR__ . '/includes/header.php';
 
         <?php foreach ($tabs as $i => $t): ?>
             <div class="sop-pane" id="sop-pane-<?= h($t['id']) ?>" <?= ($multi && $i !== 0) ? 'hidden' : '' ?>>
+              <div class="sop-tablewrap">
+                <table class="sop-table">
                 <?php foreach ($t['items'] as $it):
                     $search = strtolower($it['label'] . ' ' . $it['serial']);
+                    $delivs = $it['deliveries'];
                 ?>
-                    <div class="sop-item" data-search="<?= h($search) ?>">
-                        <div class="sop-serial"><?= h($it['serial']) ?></div>
-                        <div class="sop-label"><?= h($it['label']) ?></div>
-                        <div class="sop-total">
-                            <span class="n"><?= h($it['total']) ?></span><span class="l">Qty</span>
-                            <?php if ((float)$it['billing_qty'] > 0): ?>
-                                <span class="bill-sub" title="Of the total, this much is produced and awaiting invoice">🧾 <?= h($it['billing_total']) ?> billing</span>
-                            <?php endif; ?>
-                        </div>
-                        <div class="sop-deliveries">
-                            <?php foreach ($it['deliveries'] as $d):
+                    <tbody class="sop-item" data-search="<?= h($search) ?>">
+                        <tr>
+                            <td rowspan="2" class="sop-serial"><?= h($it['serial']) ?></td>
+                            <td rowspan="2" class="sop-name"><?= h($it['label']) ?></td>
+                            <td rowspan="2" class="sop-total">
+                                <span class="n"><?= h($it['total']) ?></span>
+                                <?php if ((float)$it['billing_qty'] > 0): ?>
+                                    <span class="bill-sub" title="Of the total, this much is produced and awaiting invoice">🧾 <?= h($it['billing_total']) ?></span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="sop-rl">Days</td>
+                            <?php foreach ($delivs as $d):
                                 $dv = $d['days'];                       // int|null
                                 $daysRaw = ($dv === null) ? '' : (string)$dv;
                                 if (!empty($d['billing'])) {
-                                    // Billing bucket: violet, overrides day-based colour.
+                                    // Billing bucket: violet, overrides the day-based colour.
                                     $cls = 'billing';
                                     $tip = 'Billing pending — produced, awaiting invoice';
                                     if ($dv !== null) $tip .= ' · delivery ' . ($dv < 0 ? abs($dv) . 'd overdue' : ($dv == 0 ? 'today' : 'in ' . $dv . 'd'));
                                 } else {
-                                    $cls = 'future';
-                                    if ($dv === null)      $cls = '';
-                                    elseif ($dv < 0)       $cls = 'overdue';
-                                    elseif ($dv == 0)      $cls = 'today';
-                                    if ($dv === null)      $tip = 'No delivery date';
-                                    elseif ($dv < 0)       $tip = abs($dv) . ' day(s) overdue';
-                                    elseif ($dv == 0)      $tip = 'Due today';
-                                    else                   $tip = 'Due in ' . $dv . ' day(s)';
+                                    if ($dv === null)      { $cls = 'nodate';  $tip = 'No delivery date'; }
+                                    elseif ($dv < 0)       { $cls = 'overdue'; $tip = abs($dv) . ' day(s) overdue'; }
+                                    elseif ($dv == 0)      { $cls = 'today';   $tip = 'Due today'; }
+                                    else                   { $cls = 'future';  $tip = 'Due in ' . $dv . ' day(s)'; }
                                 }
                             ?>
-                                <span class="sop-chip <?= $cls ?>" title="<?= h($tip) ?>">
-                                    <?php if (!empty($d['billing'])): ?><span class="bill">BILL</span><?php endif; ?>
-                                    <span class="d"><?= h($daysRaw !== '' ? $daysRaw : '—') ?></span>
-                                    <span class="q"><?= h($d['qty'] !== '' ? $d['qty'] : '—') ?></span>
-                                </span>
+                                <td class="sop-day <?= $cls ?>" title="<?= h($tip) ?>"><?= h($daysRaw !== '' ? $daysRaw : '—') ?></td>
                             <?php endforeach; ?>
-                        </div>
-                    </div>
+                        </tr>
+                        <tr>
+                            <td class="sop-rl">Qty</td>
+                            <?php foreach ($delivs as $d): ?>
+                                <td class="sop-qty<?= !empty($d['billing']) ? ' billing' : '' ?>"><?= h($d['qty'] !== '' ? $d['qty'] : '—') ?></td>
+                            <?php endforeach; ?>
+                        </tr>
+                    </tbody>
                 <?php endforeach; ?>
-                <div class="sop-no-match">No parts match your search.</div>
+                </table>
+              </div>
+              <div class="sop-no-match">No parts match your search.</div>
             </div>
         <?php endforeach; ?>
 
