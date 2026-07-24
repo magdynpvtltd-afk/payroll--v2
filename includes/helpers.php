@@ -136,6 +136,7 @@ function _routed_modules()
         'tools',         // tools.php — iframe wrapper for engineering tools
         'manuals',       // manuals.php — iframe wrapper for tool manuals
         'code_sequences', // code_sequences.php — admin page for auto-code prefixes
+        'code_streamline', // code_streamline.php — one-click renumber of non-numeric asset/inv codes
     ];
 }
 
@@ -434,6 +435,7 @@ function module_icon($code, $fallback = '◆')
         'taskflow'             => "\xE2\x98\x91\xEF\xB8\x8F", // ☑️ U+2611 VS16 (ballot box with check — tasks; the box keeps it apart from inspection's bare ✓)
         'insp_templates'       => "\xF0\x9F\x93\x91",         // 📑 U+1F4D1 (bookmark tabs — template)
         'code_sequences'       => "\xF0\x9F\x94\xA2",         // 🔢 U+1F522 (numeric input symbol)
+        'code_streamline'      => "\x23\xEF\xB8\x8F\xE2\x83\xA3", // #️⃣ U+0023 VS16 U+20E3 (keycap number sign — renumber)
 
         // Invoice submodules
         'inv_create'       => "\xE2\x9E\x95",                     // ➕
